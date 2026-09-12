@@ -1,18 +1,18 @@
-# Setting up `wt` config for a new repo — instructions for an AI agent
+# Setting up `ruori` config for a new repo — instructions for an AI agent
 
-You are being asked to create the config `wt` (wt-orchestrator, a
+You are being asked to create the config `ruori` (a
 git-worktree context switcher) needs for **this repo** —
-`.wt-orchestrator.conf` *and* a `.devcontainer/Dockerfile` (plus two
+`.ruori.conf` *and* a `.devcontainer/Dockerfile` (plus two
 small files the Dockerfile copies in, see step 3). All of this is part
-of the same one-off setup: `wt`'s whole point is to run a coding agent
+of the same one-off setup: `ruori`'s whole point is to run a coding agent
 and its dev server inside a container, confined to just the worktree
 it's working in — so a devcontainer isn't an optional extra bolted
-onto `wt`, it's the thing `wt` is built around. Setting `wt` up for a
+onto `ruori`, it's the thing `ruori` is built around. Setting `ruori` up for a
 repo means giving it one. This guide is self-contained; everything you
 need is below.
 
 **This guide only creates config files.** It does not check for,
-install, or run `wt`, Docker, or anything else — see "Before you're
+install, or run `ruori`, Docker, or anything else — see "Before you're
 done" at the end for that, as a plain pointer, not something to act on
 here.
 
@@ -29,7 +29,7 @@ here.
   plan for them to correct.
 - **The devcontainer is not optional and not something to ask
   permission for up front** — building one is exactly what this guide
-  is for, same as the `.wt-orchestrator.conf` file. If this particular
+  is for, same as the `.ruori.conf` file. If this particular
   repo genuinely can't be containerized (rare — e.g. it needs direct
   hardware/GUI access), say so explicitly and explain why, rather than
   quietly skipping it or asking "do you want this?" as if it were a
@@ -37,7 +37,7 @@ here.
 
 ## Step 1 — find the main worktree root
 
-`.wt-orchestrator.conf` must live at the **main worktree's root** — the
+`.ruori.conf` must live at the **main worktree's root** — the
 original checkout with a real `.git` directory, not a linked worktree's
 `.git` *file*, and not necessarily wherever you're currently standing
 (some repos nest their worktrees inside the main tree itself, e.g.
@@ -49,7 +49,7 @@ git worktree list --porcelain | awk '/^worktree /{print $2; exit}'
 ```
 
 This is where you'll write the config file in step 5 — nowhere else.
-If a `.wt-orchestrator.conf` already exists somewhere other than this
+If a `.ruori.conf` already exists somewhere other than this
 path, that's a sign an earlier setup got it wrong; plan to move it,
 not leave a second copy behind.
 
@@ -58,7 +58,7 @@ not leave a second copy behind.
 `git worktree add` only checks out files tracked by git, so a new
 worktree starts with none of the repo's gitignored, machine-local files
 (env files, local config overrides, local certs) even though the app
-usually can't run without them. The `copy` directive tells `wt` which
+usually can't run without them. The `copy` directive tells `ruori` which
 of those to copy from the main worktree into a new one (only if it's
 missing there — never overwriting a file already present).
 
@@ -96,7 +96,7 @@ To build the list for this repo:
 Example:
 
 ```
-# .wt-orchestrator.conf — files to copy into a new worktree if missing
+# .ruori.conf — files to copy into a new worktree if missing
 copy .env
 copy .env.*
 copy config/local.json
@@ -104,28 +104,28 @@ copy config/local.json
 
 ## Step 3 — work out the devcontainer setup
 
-This is the core of the setup, not a side option: `wt` runs the coding
+This is the core of the setup, not a side option: `ruori` runs the coding
 agent and dev server inside a container confined to just this
 worktree — no host filesystem access beyond an explicit allowlist —
 and gives each concurrently-open worktree its own free host port
-instead of colliding on the same one. Every repo `wt` is set up for
+instead of colliding on the same one. Every repo `ruori` is set up for
 gets this.
 
-Four directives go in the same `.wt-orchestrator.conf` from step 2:
+Four directives go in the same `.ruori.conf` from step 2:
 
 - **`container on`** — activates it. (Bare `container`, i.e. no value,
   also works.) Always include this line — it's what turns the rest of
-  this section's directives, and the Dockerfile, into something `wt`
+  this section's directives, and the Dockerfile, into something `ruori`
   actually uses, rather than a Dockerfile just sitting there unused.
-  `wt` requires this line explicitly rather than inferring container
+  `ruori` requires this line explicitly rather than inferring container
   mode from a Dockerfile's mere presence, so that a repo with some
   *unrelated* pre-existing `.devcontainer/Dockerfile` (not written for
-  `wt`) never gets silently containerized by accident — but for a repo
-  you're setting `wt` up on via this guide, always write it.
+  `ruori`) never gets silently containerized by accident — but for a repo
+  you're setting `ruori` up on via this guide, always write it.
 - **`container-file <path>`** — Dockerfile path relative to the main
   worktree root. Defaults to `.devcontainer/Dockerfile` if omitted.
 - **`container-port <port>[:<NAME>]`** — repeatable, one per port the
-  app exposes. `wt` allocates a free host port for each and injects it
+  app exposes. `ruori` allocates a free host port for each and injects it
   into the container's environment as `<NAME>` (or `PORT_<port>` if
   `:<NAME>` is omitted).
 - **`container-copy <host-path>[:<container-path>]`** — repeatable.
@@ -156,11 +156,11 @@ mode at all:
   worktree), reachable from inside the container at
   `host.docker.internal:<port>` instead of `localhost`. Tell the user
   this plainly if it applies, and don't confuse that service's own
-  containerization (if it has any) with `wt`'s dev container — they're
+  containerization (if it has any) with `ruori`'s dev container — they're
   unrelated (see the intro above).
 
 The Dockerfile itself needs: `git`, `tmux`, and `jq` installed (`git`
-and `tmux` for `wt` to attach a session inside the container at all;
+and `tmux` for `ruori` to attach a session inside the container at all;
 `jq` for the status hook below), the project's runtime, and — if the
 user wants something to auto-start (an agent, the dev server) —
 either the image's own `CMD`/`ENTRYPOINT` or a tmux `default-command`
@@ -181,7 +181,7 @@ WORKDIR /workspace
 
 If the user's agent is Claude Code (ask if unclear), the Dockerfile
 must also install the same busy/waiting/idle + usage-cost status hook
-`wt`'s picker relies on for its `CLAUDE`/`USAGE` columns — **entirely
+`ruori`'s picker relies on for its `CLAUDE`/`USAGE` columns — **entirely
 inside the image**. This is not optional and not a separate setup
 step done later: without it those two columns just always show `-`
 for this repo's worktrees, silently, with no error. And it must never
@@ -195,31 +195,31 @@ Claude Code config on their machine.
 How it works: seven Claude Code hook events (`UserPromptSubmit`,
 `PreToolUse`, `PostToolUse`, `PermissionRequest`, `Elicitation`,
 `ElicitationResult`, `Stop`) all invoke one script with a status
-argument, which writes `busy`/`waiting`/`idle` to `.wt-claude-status`
+argument, which writes `busy`/`waiting`/`idle` to `.ruori-claude-status`
 at the worktree root, and (on `idle`) a running cost total to
-`.wt-agent-usage` there too. `wt` already bind-mounts the worktree
+`.ruori-agent-usage` there too. `ruori` already bind-mounts the worktree
 root into the container (see above), so a file written there from
-inside the container is the exact same file `wt` reads from the host
+inside the container is the exact same file `ruori` reads from the host
 — no extra plumbing needed, and both files are already covered by the
-end user's **global** gitignore if they've used `wt` in container mode
+end user's **global** gitignore if they've used `ruori` in container mode
 before (if this is their first container-mode repo, mention it: they
-should add `.wt-claude-status` and `.wt-agent-usage` to their global
+should add `.ruori-claude-status` and `.ruori-agent-usage` to their global
 `git config --global core.excludesFile` once, otherwise `git worktree
 remove` will refuse to remove a worktree these files are sitting in).
 
 Write these two files next to the Dockerfile (e.g. in `.devcontainer/`
 alongside it), then `COPY` them in:
 
-`.devcontainer/wt-claude-status-hook`:
+`.devcontainer/ruori-claude-status-hook`:
 
 ```bash
 #!/usr/bin/env bash
-# wt-claude-status-hook - records Claude Code's busy/waiting/idle status
+# ruori-claude-status-hook - records Claude Code's busy/waiting/idle status
 # (and, on "idle", a running usage-cost total) for the current worktree,
-# so wt's picker can show it. Invoked as a Claude Code hook with one of
+# so ruori's picker can show it. Invoked as a Claude Code hook with one of
 # three status arguments: busy, waiting, idle. Reads the hook's JSON
 # payload from stdin (needs "cwd") and writes to two fixed filenames at
-# the worktree root ("$cwd" — the same directory wt bind-mounts into
+# the worktree root ("$cwd" — the same directory ruori bind-mounts into
 # this container, so the host sees the same files with no extra
 # plumbing). Deliberately silent/non-blocking: any failure (bad
 # payload, no cwd, unwritable worktree) just exits 0 without writing
@@ -227,14 +227,14 @@ alongside it), then `COPY` them in:
 # session.
 set -euo pipefail
 
-STATUS_FILENAME=".wt-claude-status"
-AGENT_USAGE_FILENAME=".wt-agent-usage"
+STATUS_FILENAME=".ruori-claude-status"
+AGENT_USAGE_FILENAME=".ruori-agent-usage"
 
 status="${1:-}"
 case "$status" in
   busy | waiting | idle) ;;
   *)
-    echo "wt-claude-status-hook: usage: wt-claude-status-hook <busy|waiting|idle>" >&2
+    echo "ruori-claude-status-hook: usage: ruori-claude-status-hook <busy|waiting|idle>" >&2
     exit 0
     ;;
 esac
@@ -278,25 +278,25 @@ match everything:
 {
   "hooks": {
     "UserPromptSubmit": [
-      { "hooks": [{ "type": "command", "command": "wt-claude-status-hook busy", "timeout": 5 }] }
+      { "hooks": [{ "type": "command", "command": "ruori-claude-status-hook busy", "timeout": 5 }] }
     ],
     "PreToolUse": [
-      { "hooks": [{ "type": "command", "command": "wt-claude-status-hook busy", "timeout": 5 }] }
+      { "hooks": [{ "type": "command", "command": "ruori-claude-status-hook busy", "timeout": 5 }] }
     ],
     "PostToolUse": [
-      { "hooks": [{ "type": "command", "command": "wt-claude-status-hook busy", "timeout": 5 }] }
+      { "hooks": [{ "type": "command", "command": "ruori-claude-status-hook busy", "timeout": 5 }] }
     ],
     "PermissionRequest": [
-      { "hooks": [{ "type": "command", "command": "wt-claude-status-hook waiting", "timeout": 5 }] }
+      { "hooks": [{ "type": "command", "command": "ruori-claude-status-hook waiting", "timeout": 5 }] }
     ],
     "Elicitation": [
-      { "hooks": [{ "type": "command", "command": "wt-claude-status-hook waiting", "timeout": 5 }] }
+      { "hooks": [{ "type": "command", "command": "ruori-claude-status-hook waiting", "timeout": 5 }] }
     ],
     "ElicitationResult": [
-      { "hooks": [{ "type": "command", "command": "wt-claude-status-hook busy", "timeout": 5 }] }
+      { "hooks": [{ "type": "command", "command": "ruori-claude-status-hook busy", "timeout": 5 }] }
     ],
     "Stop": [
-      { "hooks": [{ "type": "command", "command": "wt-claude-status-hook idle", "timeout": 5 }] }
+      { "hooks": [{ "type": "command", "command": "ruori-claude-status-hook idle", "timeout": 5 }] }
     ]
   }
 }
@@ -305,8 +305,8 @@ match everything:
 Then, in the Dockerfile, after `git`/`tmux`/`jq` are installed:
 
 ```dockerfile
-COPY wt-claude-status-hook /usr/local/bin/wt-claude-status-hook
-RUN chmod +x /usr/local/bin/wt-claude-status-hook
+COPY ruori-claude-status-hook /usr/local/bin/ruori-claude-status-hook
+RUN chmod +x /usr/local/bin/ruori-claude-status-hook
 # $HOME here must match whichever user actually runs Claude Code in
 # this image — /root unless a Dockerfile USER directive says otherwise;
 # copy to both homes if you're not sure which one applies.
@@ -349,13 +349,13 @@ user:
 
 Only after the user confirms:
 
-1. Write `.wt-orchestrator.conf` at the main worktree root (from step
+1. Write `.ruori.conf` at the main worktree root (from step
    1) with the confirmed directives — `copy` lines, then the
    `container*` lines.
 2. Write the confirmed Dockerfile at the confirmed path (default
    `.devcontainer/Dockerfile`, relative to the main worktree root),
    unless the plan reused an existing one unchanged.
-3. Write `wt-claude-status-hook` and `claude-settings.json` next to it
+3. Write `ruori-claude-status-hook` and `claude-settings.json` next to it
    (if the agent is Claude Code), per the Dockerfile section above.
 
 Don't run, build, or test anything — this guide's job ends at writing
@@ -363,9 +363,9 @@ these files.
 
 ## Before you're done — one thing this guide doesn't cover
 
-**`wt` itself isn't installed or run by this guide.** Make sure the
-user actually has it set up (a symlink from their wt-orchestrator
-checkout's `bin/wt` onto their `PATH` — see that repo's own
+**`ruori` itself isn't installed or run by this guide.** Make sure the
+user actually has it set up (a symlink from their ruori
+checkout's `bin/ruori` onto their `PATH` — see that repo's own
 `README.md` "Install" section) before expecting any of this config to
 take effect. If they don't have it yet, tell them so plainly rather
 than assuming.

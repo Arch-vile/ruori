@@ -1,21 +1,21 @@
-# Building `.wt-orchestrator.conf` — instructions for an AI agent
+# Building `.ruori.conf` — instructions for an AI agent
 
-You are being asked to create or update a `.wt-orchestrator.conf` file
-in the root of a git repository, for use with `wt` (wt-orchestrator), a
+You are being asked to create or update a `.ruori.conf` file
+in the root of a git repository, for use with `ruori`, a
 git-worktree context switcher. These instructions are self-contained —
-you don't need anything else from wt-orchestrator's own codebase to do
+you don't need anything else from ruori's own codebase to do
 this task. Follow them for whatever repo you've been pointed at.
 
 ## What this file is for
 
-`wt` lets a developer fzf-pick between git worktrees and switches
+`ruori` lets a developer fzf-pick between git worktrees and switches
 context into one (tmux session, editor window, etc.). `git worktree
 add` only checks out files tracked by git — so a brand-new worktree
 starts with none of the repo's gitignored, machine-local files (env
 files, local config overrides, local certs, etc.), even though the app
 usually can't run without them.
 
-On every switch, `wt` reads `.wt-orchestrator.conf` from the repo root
+On every switch, `ruori` reads `.ruori.conf` from the repo root
 and copies any file matching a `copy` pattern in it from the main
 worktree into the target worktree — but **only if that file doesn't
 already exist there**. It never overwrites a file already present, so
@@ -50,7 +50,7 @@ Plain text, one directive per line: `<directive> <value>`.
 Minimal example:
 
 ```
-# .wt-orchestrator.conf — files copied into a new worktree if missing
+# .ruori.conf — files copied into a new worktree if missing
 copy .env
 copy .env.local
 ```
@@ -87,7 +87,7 @@ copy .env.local
    notice and add later, while over-copying unrelated files is not
    obviously wrong until it causes confusion.
 5. **Keep secrets in mind, but don't worry about this file leaking
-   them**: `.wt-orchestrator.conf` itself only contains filenames/glob
+   them**: `.ruori.conf` itself only contains filenames/glob
    patterns, never file contents or secret values, so it's fine (and
    expected) to commit it to the repo alongside the code. It's the
    *files it names* that stay gitignored, not the config file itself.
@@ -96,8 +96,8 @@ copy .env.local
 
 The file must live at the **main worktree's root** — the original
 checkout with a real `.git` directory, not any linked worktree's `.git`
-*file*. `wt` only ever reads it from that one location; if it ends up
-anywhere else, `wt` won't error, it'll just silently fall back to
+*file*. `ruori` only ever reads it from that one location; if it ends up
+anywhere else, `ruori` won't error, it'll just silently fall back to
 copying `.env`/`.env.*` and nothing else, which is a confusing failure
 to debug later.
 
@@ -115,21 +115,21 @@ git worktree list --porcelain | awk '/^worktree /{print $2; exit}'
 This prints the main worktree's absolute path — it's always the first
 entry `git worktree list` reports, regardless of where you're currently
 standing or how worktrees are laid out on disk. Write
-`.wt-orchestrator.conf` there, e.g.:
+`.ruori.conf` there, e.g.:
 
 ```sh
 main_root="$(git worktree list --porcelain | awk '/^worktree /{print $2; exit}')"
-# then create/edit "$main_root/.wt-orchestrator.conf"
+# then create/edit "$main_root/.ruori.conf"
 ```
 
-If a `.wt-orchestrator.conf` already exists somewhere else (e.g. you
+If a `.ruori.conf` already exists somewhere else (e.g. you
 find one sitting inside a linked worktree instead), that's a sign an
 earlier setup got this wrong — move it to `$main_root`, don't leave a
 second copy behind.
 
 ## After writing it
 
-- Confirm the file is really at `$main_root/.wt-orchestrator.conf`
+- Confirm the file is really at `$main_root/.ruori.conf`
   (see above), not wherever you happened to be invoked from.
 - Sanity-check your list by re-reading `.gitignore` once more and
   confirming every `copy` pattern's target either exists now or is

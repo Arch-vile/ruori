@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# wt - worktree context switcher (MVP)
+# ruori - worktree context switcher (MVP)
 #
 # Run with no args in a terminal you keep open as your manager. Lists the
 # git worktrees of the current repo, lets you fzf-pick one, then per pick:
@@ -10,17 +10,17 @@
 # ...then loops back to the picker so this terminal stays the manager.
 #
 # Usage:
-#   wt                  manager loop: pick a worktree, get an iTerm2 window, repeat
-#   wt new <branch> [start-point]
+#   ruori               manager loop: pick a worktree, get an iTerm2 window, repeat
+#   ruori new <branch> [start-point]
 #                       create a sibling worktree for <branch> (new or existing)
 #                       and immediately activate it, same as picking it would
-#   wt list             just print worktrees + which ones have an active tmux session
+#   ruori list          just print worktrees + which ones have an active tmux session
 
 set -euo pipefail
 
 for cmd in git tmux fzf code osascript; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
-    echo "wt: required command '$cmd' not found in PATH" >&2
+    echo "ruori: required command '$cmd' not found in PATH" >&2
     exit 1
   fi
 done
@@ -41,7 +41,7 @@ tmux_bin="$(command -v tmux)"
 docker_bin="$(command -v docker || true)"
 
 if ! git rev-parse --show-toplevel >/dev/null 2>&1; then
-  echo "wt: not inside a git repository" >&2
+  echo "ruori: not inside a git repository" >&2
   exit 1
 fi
 
@@ -49,11 +49,11 @@ repo_root="$(git rev-parse --show-toplevel)"
 repo_name="$(basename "$repo_root")"
 
 # Default "current worktree" for the picker's marker column (see
-# marker_for) — the main worktree, since `wt` can only be launched from
+# marker_for) — the main worktree, since `ruori` can only be launched from
 # there (see the check below). Overridden by load_current_worktree
 # (below main_worktree_path's own assignment) with whatever you last
-# switched to, possibly in a previous run of `wt` — this default is only
-# what a brand-new repo with no `wt` history yet would show.
+# switched to, possibly in a previous run of `ruori` — this default is only
+# what a brand-new repo with no `ruori` history yet would show.
 current_worktree_path="$repo_root"
 
 sanitize() {
@@ -75,7 +75,7 @@ activation_times_cache_file() {
     /*) ;;
     *) common_dir="$repo_root/$common_dir" ;;
   esac
-  printf '%s/wt-activation-times' "$common_dir"
+  printf '%s/ruori-activation-times' "$common_dir"
 }
 
 declare -A activation_time_for_path
@@ -99,7 +99,7 @@ save_activation_time() {
   local path="$1" cache_file tmp p
   cache_file="$(activation_times_cache_file)" || return 0
   activation_time_for_path["$path"]="$(date +%s)"
-  tmp="$(mktemp -t wt-activation-times)"
+  tmp="$(mktemp -t ruori-activation-times)"
   for p in "${!activation_time_for_path[@]}"; do
     printf '%s\t%s\n' "${activation_time_for_path[$p]}" "$p"
   done >"$tmp"
@@ -136,7 +136,7 @@ sort_worktrees_by_activation() {
 
 # --- parse `git worktree list --porcelain` into parallel arrays ---
 # A function (not inline top-level code) because the worktree list can now
-# change mid-session — `wt rm`/Ctrl-D delete one — so the manager loop
+# change mid-session — `ruori rm`/Ctrl-D delete one — so the manager loop
 # re-parses on every iteration instead of trusting arrays built once at
 # startup, which would otherwise go stale and desync from what the picker
 # (each reload is its own fresh process, so it always sees current state)
@@ -191,7 +191,7 @@ parse_worktrees() {
   flush_entry
 
   if [ "${#paths[@]}" -eq 0 ]; then
-    echo "wt: no worktrees found for $repo_root" >&2
+    echo "ruori: no worktrees found for $repo_root" >&2
     exit 1
   fi
 
@@ -205,7 +205,7 @@ parse_worktrees() {
 
 parse_worktrees
 
-# `wt` must be launched from the main worktree, not a linked one: several
+# `ruori` must be launched from the main worktree, not a linked one: several
 # things below key off `repo_root` (the tmux session-name prefix via
 # `repo_name`, the PR/usage/current-worktree cache file locations) on the
 # assumption that it's a single stable, repo-wide identity — but
@@ -213,22 +213,22 @@ parse_worktrees
 # worktree's tree you're standing in when you run it. Launching from a
 # linked worktree would silently give those a different value each time
 # (e.g. tmux session names for the very same worktree changing depending
-# on where you happened to launch `wt` from), rather than failing loudly.
+# on where you happened to launch `ruori` from), rather than failing loudly.
 if [ "$repo_root" != "$main_worktree_path" ]; then
-  echo "wt: must be run from the main worktree, not a linked one." >&2
-  echo "wt: you're in:    $repo_root" >&2
-  echo "wt: main worktree: $main_worktree_path" >&2
-  echo "wt: cd there and run wt again." >&2
+  echo "ruori: must be run from the main worktree, not a linked one." >&2
+  echo "ruori: you're in:    $repo_root" >&2
+  echo "ruori: main worktree: $main_worktree_path" >&2
+  echo "ruori: cd there and run ruori again." >&2
   exit 1
 fi
 
-# Per-repo config file, created by the user (wt never writes it) at the
+# Per-repo config file, created by the user (ruori never writes it) at the
 # main worktree's root. Each non-blank, non-comment (#) line is
 # "<directive> <value>" — e.g. "copy .env.*" — so the file can grow more
 # kinds of setting later (editor override, port base, ...) without
 # changing its shape; unrecognized directives are warned about and
 # skipped rather than breaking parsing.
-CONFIG_FILENAME=".wt-orchestrator.conf"
+CONFIG_FILENAME=".ruori.conf"
 
 # Emits "<directive>\t<value>" for each config line, trimmed and with
 # comments stripped. If the config file doesn't exist, emits nothing —
@@ -262,7 +262,7 @@ warn_unknown_directives() {
     for k in $KNOWN_CONFIG_DIRECTIVES; do
       [ "$key" = "$k" ] && { known=1; break; }
     done
-    [ "$known" = "1" ] || echo "wt: ${CONFIG_FILENAME}: unknown directive '$key' (ignored)" >&2
+    [ "$known" = "1" ] || echo "ruori: ${CONFIG_FILENAME}: unknown directive '$key' (ignored)" >&2
   done < <(config_directives)
 }
 
@@ -385,7 +385,7 @@ sync_env_files() {
       if [ ! -e "$target_file" ]; then
         mkdir -p "$(dirname "$target_file")"
         cp "$f" "$target_file"
-        echo "wt: copied $rel into worktree"
+        echo "ruori: copied $rel into worktree"
       fi
     done
   done < <(copy_patterns)
@@ -406,7 +406,7 @@ session_name_for() {
 
 # --- container mode (see docs/container-sandbox-plan.md) ---
 #
-# `wt` never decides what runs inside a container's tmux session (see
+# `ruori` never decides what runs inside a container's tmux session (see
 # the main loop below) — this section only orchestrates the container's
 # own lifecycle: image build, start/stop, mounts, ports, copy-in.
 
@@ -434,7 +434,7 @@ git_common_dir() {
 # for, which tolerate mixed case), so a repo like "packPixie" would
 # otherwise fail the build with "repository name must be lowercase".
 container_image_for() {
-  printf 'wt/%s:latest' "$(sanitize "$repo_name" | tr 'A-Z' 'a-z')"
+  printf 'ruori/%s:latest' "$(sanitize "$repo_name" | tr 'A-Z' 'a-z')"
 }
 
 container_running() {
@@ -512,10 +512,10 @@ container_build_if_needed() {
   image="$(container_image_for)"
   dockerfile="$main_worktree_path/$(container_file_path)"
   if [ ! -f "$dockerfile" ]; then
-    echo "wt: container mode: Dockerfile not found at $dockerfile (see 'container-file' in ${CONFIG_FILENAME})" >&2
+    echo "ruori: container mode: Dockerfile not found at $dockerfile (see 'container-file' in ${CONFIG_FILENAME})" >&2
     return 1
   fi
-  echo "wt: building container image $image" >&2
+  echo "ruori: building container image $image" >&2
   docker build -t "$image" -f "$dockerfile" "$main_worktree_path"
 }
 
@@ -525,7 +525,7 @@ container_build_if_needed() {
 ports_cache_file() {
   local common_dir
   common_dir="$(git_common_dir)" || return 1
-  printf '%s/wt-ports' "$common_dir"
+  printf '%s/ruori-ports' "$common_dir"
 }
 
 CONTAINER_PORT_BASE=20000
@@ -563,7 +563,7 @@ port_seed_for() {
 }
 
 # Reuses an existing row for this (session, container_port) pair if
-# present (idempotent across `wt` restarts and container stop/start);
+# present (idempotent across `ruori` restarts and container stop/start);
 # otherwise scans forward from port_seed_for's hash-derived starting
 # point for the first port that's both unused in this repo's own cache
 # and not actually bound on the host, appends a new row, and returns it.
@@ -597,13 +597,13 @@ allocate_port_for() {
 }
 
 # Strips every row for $1 (a session name) from the ports state file —
-# called from teardown (wt rm / Ctrl-D) so freed ports aren't shown as
-# allocated by `wt ports` or reused by a later, unrelated worktree.
+# called from teardown (ruori rm / Ctrl-D) so freed ports aren't shown as
+# allocated by `ruori ports` or reused by a later, unrelated worktree.
 release_ports_for() {
   local session="$1" cache_file tmp
   cache_file="$(ports_cache_file)" || return 0
   [ -f "$cache_file" ] || return 0
-  tmp="$(mktemp -t wt-ports)"
+  tmp="$(mktemp -t ruori-ports)"
   grep -v "^${session}	" "$cache_file" >"$tmp" 2>/dev/null || true
   mv "$tmp" "$cache_file"
 }
@@ -632,7 +632,7 @@ container_start_if_needed() {
     return 0
   fi
 
-  common_dir="$(git_common_dir)" || { echo "wt: container mode: could not resolve git common dir" >&2; return 1; }
+  common_dir="$(git_common_dir)" || { echo "ruori: container mode: could not resolve git common dir" >&2; return 1; }
   container_build_if_needed || return 1
 
   local -a port_flags=()
@@ -644,7 +644,7 @@ container_start_if_needed() {
     port_flags+=(-p "127.0.0.1:${host_port}:${container_port}" -e "${env_name}=${host_port}")
   done < <(container_ports)
 
-  echo "wt: creating container $name" >&2
+  echo "ruori: creating container $name" >&2
   docker run -d --name "$name" \
     -v "$path:$path" \
     -v "$common_dir:$common_dir" \
@@ -657,7 +657,7 @@ container_start_if_needed() {
     if [ -e "$host_path" ]; then
       docker cp "$host_path" "$name:$container_path"
     else
-      echo "wt: container-copy: host path not found, skipping: $host_path" >&2
+      echo "ruori: container-copy: host path not found, skipping: $host_path" >&2
     fi
   done < <(container_copy_entries)
 }
@@ -678,17 +678,17 @@ tmux_has_session() {
 
 require_docker_if_container_mode() {
   if ! command -v docker >/dev/null 2>&1; then
-    echo "wt: required command 'docker' not found in PATH (needed because ${CONFIG_FILENAME} has 'container on')" >&2
+    echo "ruori: required command 'docker' not found in PATH (needed because ${CONFIG_FILENAME} has 'container on')" >&2
     exit 1
   fi
 }
 
-# Filename wt-claude-status-hook (see docs/agent-hooks-setup-guide.md)
+# Filename ruori-claude-status-hook (see docs/agent-hooks-setup-guide.md)
 # writes at the root of the worktree it's running in — the two sides
 # only need to agree on this name, not on any shared central location.
 # It must be excluded via the user's GLOBAL gitignore, not a per-repo
 # one — see the setup guide.
-CLAUDE_STATUS_FILENAME=".wt-claude-status"
+CLAUDE_STATUS_FILENAME=".ruori-claude-status"
 
 # Same host/container-transparent trick as CLAUDE_STATUS_FILENAME above,
 # extended to carry usage data (see docs/container-sandbox-plan.md
@@ -697,9 +697,9 @@ CLAUDE_STATUS_FILENAME=".wt-claude-status"
 # container in container mode, this bind-mounted path is the only
 # reliable way for the host-side USAGE column to see it, since
 # ~/.claude/projects lives inside the container's own filesystem and is
-# never live-mounted. Generic, agent-owned extension point: `wt` reads
+# never live-mounted. Generic, agent-owned extension point: `ruori` reads
 # it without knowing (or caring) which agent wrote it.
-AGENT_USAGE_FILENAME=".wt-agent-usage"
+AGENT_USAGE_FILENAME=".ruori-agent-usage"
 
 # How stale an AGENT_USAGE_FILENAME reading can be before usage_cost_for
 # ignores it and falls back to the host-side jsonl scan instead — guards
@@ -739,7 +739,7 @@ declare -A pr_status_map
 # checked yet" instead of showing "-" for both.
 pr_status_ever_fetched=0
 
-# Each `reload(bash wt __fzfgen...)` binding runs in a brand-new bash
+# Each `reload(bash ruori __fzfgen...)` binding runs in a brand-new bash
 # process (fzf shells out), so pr_status_map can't just live in memory
 # between reloads the way it does across the manager's own while-loop
 # iterations — it has to round-trip through a file. Cached under the
@@ -752,7 +752,7 @@ pr_status_cache_file() {
     /*) ;;
     *) common_dir="$repo_root/$common_dir" ;;
   esac
-  printf '%s/wt-pr-status.cache' "$common_dir"
+  printf '%s/ruori-pr-status.cache' "$common_dir"
 }
 
 save_pr_status_cache() {
@@ -916,7 +916,7 @@ usage_cost_cache_file() {
     /*) ;;
     *) common_dir="$repo_root/$common_dir" ;;
   esac
-  printf '%s/wt-usage-cost.cache' "$common_dir"
+  printf '%s/ruori-usage-cost.cache' "$common_dir"
 }
 
 save_usage_cost_cache() {
@@ -1026,7 +1026,7 @@ marker_for() {
   [ "$1" = "$current_worktree_path" ] && printf '*' || printf ' '
 }
 
-# Persists current_worktree_path across separate runs of `wt` — without
+# Persists current_worktree_path across separate runs of `ruori` — without
 # this, a brand-new process always defaults back to the main worktree
 # (see the "must be run from the main worktree" check above), forgetting
 # whatever you'd last switched to in a previous run. Cached under the
@@ -1038,7 +1038,7 @@ current_worktree_cache_file() {
     /*) ;;
     *) common_dir="$repo_root/$common_dir" ;;
   esac
-  printf '%s/wt-current-worktree' "$common_dir"
+  printf '%s/ruori-current-worktree' "$common_dir"
 }
 
 save_current_worktree() {
@@ -1050,7 +1050,7 @@ save_current_worktree() {
 # Overrides current_worktree_path with whatever was last persisted, as
 # long as that worktree still exists (falls back to the default — the
 # main worktree — if there's no cache yet, or the persisted worktree was
-# since removed, e.g. via `wt rm`).
+# since removed, e.g. via `ruori rm`).
 load_current_worktree() {
   local cache_file persisted p
   cache_file="$(current_worktree_cache_file)" || return 0
@@ -1089,7 +1089,7 @@ truncate_pad() {
 # marker/state/claude/pr/usage/branch are shown in the picker; the rest
 # are available to its preview window and ctrl-x/ctrl-d bindings via
 # fzf's {n} placeholders regardless of what --with-nth displays. Shared
-# by `wt list`, the interactive picker, and the picker's own reload (so
+# by `ruori list`, the interactive picker, and the picker's own reload (so
 # a session killed via ctrl-x is reflected immediately).
 #
 # The state column (and header, see fzf_header_line) doubles as tmux
@@ -1145,7 +1145,7 @@ fzf_header_line() {
     "$USAGE_COL_WIDTH" "USAGE" "$BRANCH_COL_WIDTH" "BRANCH"
 }
 
-# Deletes one worktree and everything wt itself created for it: kills its
+# Deletes one worktree and everything ruori itself created for it: kills its
 # tmux session (if any), removes the worktree via `git worktree remove`
 # (falling back to --force, with confirmation, if git refuses because of
 # uncommitted/untracked changes), optionally deletes the local branch, and
@@ -1157,7 +1157,7 @@ delete_worktree() {
   local path="$1" branch="$2" session="$3" confirm
 
   if [ "$path" = "$main_worktree_path" ]; then
-    echo "wt: refusing to delete the main worktree ($path)" >&2
+    echo "ruori: refusing to delete the main worktree ($path)" >&2
     return 1
   fi
 
@@ -1170,7 +1170,7 @@ delete_worktree() {
   read -r -p "Delete this worktree? [y/N] " confirm
   case "$confirm" in
     y|Y|yes|YES) ;;
-    *) echo "wt: aborted, nothing deleted"; return 1 ;;
+    *) echo "ruori: aborted, nothing deleted"; return 1 ;;
   esac
 
   tmux kill-session -t "$session" 2>/dev/null || true
@@ -1181,21 +1181,21 @@ delete_worktree() {
   fi
 
   local rm_err
-  rm_err="$(mktemp -t wt-rm-err)"
+  rm_err="$(mktemp -t ruori-rm-err)"
   if ! git -C "$repo_root" worktree remove "$path" 2>"$rm_err"; then
-    echo "wt: git worktree remove failed:" >&2
+    echo "ruori: git worktree remove failed:" >&2
     sed 's/^/  /' "$rm_err" >&2
     rm -f "$rm_err"
     read -r -p "Force removal? This discards any uncommitted/untracked changes in that worktree. [y/N] " confirm
     case "$confirm" in
       y|Y|yes|YES)
         if ! git -C "$repo_root" worktree remove --force "$path"; then
-          echo "wt: git worktree remove --force also failed; nothing further attempted" >&2
+          echo "ruori: git worktree remove --force also failed; nothing further attempted" >&2
           return 1
         fi
         ;;
       *)
-        echo "wt: not removed"
+        echo "ruori: not removed"
         return 1
         ;;
     esac
@@ -1209,7 +1209,7 @@ delete_worktree() {
       read -r -p "Also delete local branch '$branch'? [y/N] " confirm
       case "$confirm" in
         y|Y|yes|YES)
-          git -C "$repo_root" branch -D "$branch" 2>&1 | sed 's/^/wt: /' || true
+          git -C "$repo_root" branch -D "$branch" 2>&1 | sed 's/^/ruori: /' || true
           ;;
       esac
       ;;
@@ -1219,12 +1219,12 @@ delete_worktree() {
   # doesn't keep showing stale data for a branch that no longer exists.
   local cache_file tmp_cache
   cache_file="$(pr_status_cache_file)" && [ -f "$cache_file" ] && {
-    tmp_cache="$(mktemp -t wt-pr-cache)"
+    tmp_cache="$(mktemp -t ruori-pr-cache)"
     grep -v "^${branch}	" "$cache_file" >"$tmp_cache" 2>/dev/null || true
     mv "$tmp_cache" "$cache_file"
   }
 
-  echo "wt: deleted worktree for '$branch'"
+  echo "ruori: deleted worktree for '$branch'"
 }
 
 # Creates a worktree for $1 (an existing or brand-new branch), optionally
@@ -1238,7 +1238,7 @@ create_worktree_for_branch() {
 
   for i in "${!paths[@]}"; do
     if [ "${branches[$i]}" = "$branch_arg" ]; then
-      echo "wt: worktree for branch '$branch_arg' already exists at ${paths[$i]} (see 'wt list')" >&2
+      echo "ruori: worktree for branch '$branch_arg' already exists at ${paths[$i]} (see 'ruori list')" >&2
       return 1
     fi
   done
@@ -1257,14 +1257,14 @@ create_worktree_for_branch() {
   # something like "x on feat/x" instead of "feat-x on feat/x".
   new_path="$new_worktree_root/$(printf '%s' "$branch_arg" | tr '/' '-')"
   if [ -e "$new_path" ]; then
-    echo "wt: refusing to create worktree: $new_path already exists" >&2
+    echo "ruori: refusing to create worktree: $new_path already exists" >&2
     return 1
   fi
   mkdir -p "$(dirname "$new_path")"
 
   if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$branch_arg"; then
     if [ -n "$start_point" ]; then
-      echo "wt: branch '$branch_arg' already exists; ignoring start-point '$start_point'" >&2
+      echo "ruori: branch '$branch_arg' already exists; ignoring start-point '$start_point'" >&2
     fi
     if ! git -C "$repo_root" worktree add "$new_path" "$branch_arg"; then
       return 1
@@ -1275,13 +1275,13 @@ create_worktree_for_branch() {
     fi
   fi
 
-  echo "wt: created worktree for '$branch_arg' at $new_path"
+  echo "ruori: created worktree for '$branch_arg' at $new_path"
   created_worktree_path="$new_path"
 }
 
 # Computed once, not per-picker-iteration: container mode is opt-in per
 # repo, never per worktree, so this one flag governs every code path
-# below (main loop, iTerm2 attach, wt rm, the picker's TMUX column) for
+# below (main loop, iTerm2 attach, ruori rm, the picker's TMUX column) for
 # the whole run. A repo with no `container on` directive gets
 # CONTAINER_MODE=0 and is byte-identical to today (see decision I).
 warn_unknown_directives
@@ -1301,45 +1301,45 @@ pending_activate_branch=""
 
 case "$cmd" in
   init)
-    # Resolves the wt-orchestrator checkout `bin/wt` was symlinked from
-    # (the README's own install step: `ln -s .../bin/wt ~/.local/bin/wt`)
+    # Resolves the ruori checkout `bin/ruori` was symlinked from
+    # (the README's own install step: `ln -s .../bin/ruori ~/.local/bin/ruori`)
     # so the skill file below can be built from the real
     # docs/new-repo-setup-guide.md sitting next to it, rather than a
     # second copy baked into this script that could drift out of sync.
     # Manual symlink-chain resolution, not `readlink -f` (missing on some
     # macOS/BSD `readlink`s) — BASH_SOURCE[0], not $0, since $0 is just
-    # whatever name this script was invoked as (e.g. `wt`, if found via
+    # whatever name this script was invoked as (e.g. `ruori`, if found via
     # PATH), while BASH_SOURCE[0] is this file's own path regardless.
-    wt_src="${BASH_SOURCE[0]}"
-    while [ -L "$wt_src" ]; do
-      wt_src_dir="$(cd -P "$(dirname "$wt_src")" && pwd)"
-      wt_src="$(readlink "$wt_src")"
-      case "$wt_src" in
+    ruori_src="${BASH_SOURCE[0]}"
+    while [ -L "$ruori_src" ]; do
+      ruori_src_dir="$(cd -P "$(dirname "$ruori_src")" && pwd)"
+      ruori_src="$(readlink "$ruori_src")"
+      case "$ruori_src" in
         /*) ;;
-        *) wt_src="$wt_src_dir/$wt_src" ;;
+        *) ruori_src="$ruori_src_dir/$ruori_src" ;;
       esac
     done
-    wt_orchestrator_root="$(dirname "$(cd -P "$(dirname "$wt_src")" && pwd)")"
-    guide_src="$wt_orchestrator_root/docs/new-repo-setup-guide.md"
+    ruori_root="$(dirname "$(cd -P "$(dirname "$ruori_src")" && pwd)")"
+    guide_src="$ruori_root/docs/new-repo-setup-guide.md"
     if [ ! -f "$guide_src" ]; then
-      echo "wt: init: can't find $guide_src" >&2
-      echo "wt: init: is 'wt' still a symlink into a wt-orchestrator checkout? (see README.md 'Install')" >&2
+      echo "ruori: init: can't find $guide_src" >&2
+      echo "ruori: init: is 'ruori' still a symlink into a ruori checkout? (see README.md 'Install')" >&2
       exit 1
     fi
 
-    skill_dir="$repo_root/.claude/skills/wt-setup-repo"
+    skill_dir="$repo_root/.claude/skills/ruori-setup-repo"
     mkdir -p "$skill_dir"
     {
       printf '%s\n' '---'
-      printf '%s\n' 'name: wt-setup-repo'
-      printf '%s\n' "description: 'Set up wt (wt-orchestrator) for this repo: write .wt-orchestrator.conf and a container-mode Dockerfile, with the Claude Code busy/waiting/idle status hook baked into the image itself, never into host Claude Code config. Trigger phrases: set up wt, wt init, configure wt for this repo, wt-setup-repo.'"
+      printf '%s\n' 'name: ruori-setup-repo'
+      printf '%s\n' "description: 'Set up ruori for this repo: write .ruori.conf and a container-mode Dockerfile, with the Claude Code busy/waiting/idle status hook baked into the image itself, never into host Claude Code config. Trigger phrases: set up ruori, ruori init, configure ruori for this repo, ruori-setup-repo.'"
       printf '%s\n' '---'
       printf '\n'
       cat "$guide_src"
     } >"$skill_dir/SKILL.md"
 
-    echo "wt: wrote $skill_dir/SKILL.md"
-    echo "wt: commit it, then ask Claude Code (in a normal host session, in this repo) to run the wt-setup-repo skill"
+    echo "ruori: wrote $skill_dir/SKILL.md"
+    echo "ruori: commit it, then ask Claude Code (in a normal host session, in this repo) to run the ruori-setup-repo skill"
     exit 0
     ;;
   list)
@@ -1384,7 +1384,7 @@ case "$cmd" in
     branch_arg="${2:-}"
     start_point="${3:-}"
     if [ -z "$branch_arg" ]; then
-      echo "wt: usage: wt new <branch> [start-point]" >&2
+      echo "ruori: usage: ruori new <branch> [start-point]" >&2
       exit 1
     fi
     created_worktree_path=""
@@ -1395,7 +1395,7 @@ case "$cmd" in
   rm)
     branch_arg="${2:-}"
     if [ -z "$branch_arg" ]; then
-      echo "wt: usage: wt rm <branch>" >&2
+      echo "ruori: usage: ruori rm <branch>" >&2
       exit 1
     fi
     found=-1
@@ -1406,7 +1406,7 @@ case "$cmd" in
       fi
     done
     if [ "$found" -lt 0 ]; then
-      echo "wt: no worktree found for branch '$branch_arg' (see 'wt list')" >&2
+      echo "ruori: no worktree found for branch '$branch_arg' (see 'ruori list')" >&2
       exit 1
     fi
     session_name="$(session_name_for "${branches[$found]}" "${paths[$found]}")"
@@ -1415,11 +1415,11 @@ case "$cmd" in
     ;;
   details)
     # Accepts either the branch name or the tmux/container session name
-    # (the latter being what the picker's preview panel and `wt list`'s
+    # (the latter being what the picker's preview panel and `ruori list`'s
     # SESSION column actually show) — whichever the caller has handy.
     session_arg="${2:-}"
     if [ -z "$session_arg" ]; then
-      echo "wt: usage: wt details <branch-or-session>" >&2
+      echo "ruori: usage: ruori details <branch-or-session>" >&2
       exit 1
     fi
     found=-1
@@ -1431,7 +1431,7 @@ case "$cmd" in
       fi
     done
     if [ "$found" -lt 0 ]; then
-      echo "wt: no worktree found for branch or session '$session_arg' (see 'wt list')" >&2
+      echo "ruori: no worktree found for branch or session '$session_arg' (see 'ruori list')" >&2
       exit 1
     fi
     session_name="$(session_name_for "${branches[$found]}" "${paths[$found]}")"
@@ -1516,7 +1516,7 @@ case "$cmd" in
     # actually opens tmux/VS Code/iTerm2 for it.
     read -r -p "New branch name: " branch_name
     if [ -z "$branch_name" ]; then
-      echo "wt: aborted, no branch name given"
+      echo "ruori: aborted, no branch name given"
     else
       created_worktree_path=""
       create_worktree_for_branch "$branch_name" ""
@@ -1524,7 +1524,7 @@ case "$cmd" in
     exit 0
     ;;
   *)
-    echo "wt: unknown command '$cmd' (expected 'switch', 'new', 'list', 'rm', or 'ports')" >&2
+    echo "ruori: unknown command '$cmd' (expected 'switch', 'new', 'list', 'rm', or 'ports')" >&2
     exit 1
     ;;
 esac
@@ -1534,12 +1534,12 @@ esac
 # switch. Empty until the first successful switch.
 active_iterm_window_id=""
 
-# Debug log for the iTerm2 window open/close lifecycle — every id wt
+# Debug log for the iTerm2 window open/close lifecycle — every id ruori
 # thinks is active, every close it attempts, every window it opens, and
-# whether each of those actually did what wt expected. Exists because
+# whether each of those actually did what ruori expected. Exists because
 # "the previous worktree's terminal window doesn't get closed" reports
 # are otherwise very hard to diagnose after the fact: by the time you
-# notice a leftover window, wt's own in-memory state (what it *thought*
+# notice a leftover window, ruori's own in-memory state (what it *thought*
 # it had just closed/opened) is long gone. Appended to, never rotated or
 # cleared automatically — see README "Troubleshooting: leftover iTerm2
 # windows" for how to read/clear it.
@@ -1550,7 +1550,7 @@ iterm_log_file() {
     /*) ;;
     *) common_dir="$repo_root/$common_dir" ;;
   esac
-  printf '%s/wt-iterm.log' "$common_dir"
+  printf '%s/ruori-iterm.log' "$common_dir"
 }
 
 log_iterm() {
@@ -1569,7 +1569,7 @@ iterm_window_ids() {
 # Where the id of the currently-tracked iTerm2 window is persisted, so a
 # restarted manager can still close the window its predecessor opened.
 # Without this the id lived only in active_iterm_window_id above, and
-# restarting `wt` (to pick up an update, say) orphaned whatever window
+# restarting `ruori` (to pick up an update, say) orphaned whatever window
 # was open: the fresh process started with no id, skipped the close on
 # the next switch, and left two worktree windows on screen.
 iterm_window_state_file() {
@@ -1579,7 +1579,7 @@ iterm_window_state_file() {
     /*) ;;
     *) common_dir="$repo_root/$common_dir" ;;
   esac
-  printf '%s/wt-iterm-window' "$common_dir"
+  printf '%s/ruori-iterm-window' "$common_dir"
 }
 
 # iTerm2's current pid, or empty if it isn't running. Recorded alongside
@@ -1603,10 +1603,10 @@ save_active_iterm_window_id() {
 }
 
 # Adopt the window the previous manager process was tracking, so a
-# restart of `wt` doesn't orphan it. Only when it is still open and still
+# restart of `ruori` doesn't orphan it. Only when it is still open and still
 # belongs to the same iTerm2 run; anything else and we forget it, which
 # is the safe direction to be wrong in (a stray window the user closes by
-# hand, rather than one wt closes out from under them).
+# hand, rather than one ruori closes out from under them).
 load_active_iterm_window_id() {
   local f saved_pid saved_id now_pid
   active_iterm_window_id=""
@@ -1663,7 +1663,7 @@ open_iterm_window_for() {
   # session_check_cmd mirrors tmux_has_session's own container/host
   # distinction, and is what tells a genuine attach failure apart from
   # the session/container simply having been torn down out from under
-  # this window (ctrl-x, ctrl-d/delete, `wt rm`, or the session's last
+  # this window (ctrl-x, ctrl-d/delete, `ruori rm`, or the session's last
   # pane just exiting on its own) — see the generated script below.
   if [ "$use_container" = "1" ]; then
     attach_cmd="'$docker_bin' exec -it '$session' tmux attach -t '$session'"
@@ -1696,13 +1696,13 @@ open_iterm_window_for() {
     done
     log_iterm "close attempt: id=${active_iterm_window_id} exit=${close_ec} output=${close_out:-<empty>} still_open_after_wait=${still_open}"
     if [ "$still_open" = "yes" ]; then
-      echo "wt: warning: iTerm2 window ${active_iterm_window_id} did not close — see $(iterm_log_file 2>/dev/null || echo '<log file>')" >&2
+      echo "ruori: warning: iTerm2 window ${active_iterm_window_id} did not close — see $(iterm_log_file 2>/dev/null || echo '<log file>')" >&2
     fi
     active_iterm_window_id=""
     save_active_iterm_window_id
   fi
 
-  script_path="$(mktemp -t wt-attach)"
+  script_path="$(mktemp -t ruori-attach)"
   cat >"$script_path" <<SCRIPT
 #!/bin/bash
 # iTerm2 otherwise titles the window after the foreground job (e.g.
@@ -1714,11 +1714,11 @@ $attach_cmd
 ec=\$?
 if [ "\$ec" -ne 0 ] && $session_check_cmd >/dev/null 2>&1; then
   # The session/container is still there, so this wasn't just it being
-  # torn down (ctrl-x, ctrl-d/delete, \`wt rm\`, or its last pane exiting
+  # torn down (ctrl-x, ctrl-d/delete, \`ruori rm\`, or its last pane exiting
   # on its own) — a real attach failure, worth pausing to read.
   echo
-  echo "[wt] tmux attach exited with code \$ec"
-  echo "[wt] press Enter to close this window"
+  echo "[ruori] tmux attach exited with code \$ec"
+  echo "[ruori] press Enter to close this window"
   read -r
 fi
 rm -f "$script_path"
@@ -1778,7 +1778,7 @@ EOF
     log_iterm "tracking window id=${new_window_id} for session=${session}"
   else
     log_iterm "FAILED to open/track a window for session=${session}"
-    echo "wt: failed to open an iTerm2 window (is iTerm2 installed, and is 'Allow all apps to control iTerm2 via AppleEvents' enabled in iTerm2 > Settings > General > Magic?)" >&2
+    echo "ruori: failed to open an iTerm2 window (is iTerm2 installed, and is 'Allow all apps to control iTerm2 via AppleEvents' enabled in iTerm2 > Settings > General > Magic?)" >&2
   fi
 }
 
@@ -1786,7 +1786,7 @@ EOF
 # to become "the active worktree": env-file copy-in, tmux/container session
 # start-or-reuse, VS Code, iTerm2 window, and persisting it as current for
 # next time. Shared by the manager loop below and the 'new' command so
-# `wt new <branch>` doesn't require also fzf-picking the branch it just
+# `ruori new <branch>` doesn't require also fzf-picking the branch it just
 # created.
 activate_worktree() {
   local target_path="$1" session_name="$2" target_branch="$3"
@@ -1796,7 +1796,7 @@ activate_worktree() {
   if [ "$CONTAINER_MODE" = "1" ]; then
     container_start_if_needed "$session_name" "$target_path"
     if docker exec "$session_name" tmux has-session -t "$session_name" 2>/dev/null; then
-      echo "wt: resuming existing session for ${target_branch}"
+      echo "ruori: resuming existing session for ${target_branch}"
     else
       # No command is ever sent in here — whatever starts (an agent, a
       # shell, nothing) is entirely up to the container image's own
@@ -1806,7 +1806,7 @@ activate_worktree() {
     fi
   else
     if tmux has-session -t "$session_name" 2>/dev/null; then
-      echo "wt: resuming existing session for ${target_branch}"
+      echo "ruori: resuming existing session for ${target_branch}"
     else
       tmux new-session -d -s "$session_name" -c "$target_path"
       # No tmux session existed yet for this worktree, but Claude Code may
@@ -1823,8 +1823,8 @@ activate_worktree() {
 
   # So the next loop iteration's picker (and this iteration's own
   # reloads, had there been any after this point) marks the worktree you
-  # just switched to as current, not wherever `wt` originally started —
-  # and persisted to disk so a future, separate run of `wt` remembers it
+  # just switched to as current, not wherever `ruori` originally started —
+  # and persisted to disk so a future, separate run of `ruori` remembers it
   # too, rather than always defaulting back to the main worktree.
   current_worktree_path="$target_path"
   save_current_worktree
@@ -1866,11 +1866,11 @@ else
   fzf_preview_lines=8
 fi
 
-echo "wt: logging iTerm2 window open/close activity to $(iterm_log_file 2>/dev/null || echo '<unavailable>')" >&2
-log_iterm "=== wt manager loop starting (pid $$) ==="
+echo "ruori: logging iTerm2 window open/close activity to $(iterm_log_file 2>/dev/null || echo '<unavailable>')" >&2
+log_iterm "=== ruori manager loop starting (pid $$) ==="
 load_active_iterm_window_id
 
-# `wt new <branch>` creates the worktree in the case block above (before
+# `ruori new <branch>` creates the worktree in the case block above (before
 # these functions existed yet), then defers to here to actually activate
 # it — same tmux/container/VS Code/iTerm2 sequence as fzf-picking it would
 # have triggered, minus needing the user to also go pick it.

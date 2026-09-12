@@ -1,28 +1,28 @@
-# wt-orchestrator
+# ruori
 
 Worktree context switcher — MVP.
 
-**Setting `wt` up for a repo that doesn't have it yet?** Point an AI
+**Setting `ruori` up for a repo that doesn't have it yet?** Point an AI
 agent at `docs/new-repo-setup-guide.md` — it's a self-contained guide
-for generating that repo's `.wt-orchestrator.conf` and its
-`.devcontainer/Dockerfile` (container mode is core to how `wt` works,
+for generating that repo's `.ruori.conf` and its
+`.devcontainer/Dockerfile` (container mode is core to how `ruori` works,
 not an optional extra), asking before it writes anything. It doesn't
-install or run `wt` itself — see "Install" below for that.
+install or run `ruori` itself — see "Install" below for that.
 
-Run `wt` (with no args) in a terminal window you keep open as your
+Run `ruori` (with no args) in a terminal window you keep open as your
 **manager** — it lists the git worktrees of whatever repo you're standing
 in, lets you fzf-pick one, and on each pick:
 
-**Must be launched from the main worktree**, not a linked one — `wt`
+**Must be launched from the main worktree**, not a linked one — `ruori`
 refuses to start otherwise (with a message telling you where the main
 worktree is). This isn't arbitrary: several things (the tmux session-name
 prefix, the PR/usage/current-worktree caches) key off the directory you
-launched `wt` from on the assumption that it's one stable, repo-wide
+launched `ruori` from on the assumption that it's one stable, repo-wide
 identity — but that directory is actually wherever `git
 rev-parse --show-toplevel` resolves to, which is whichever worktree's
 tree you're standing in. Launching from a linked worktree would silently
 give those a different value depending on where you happened to launch
-`wt` from, rather than erroring loudly.
+`ruori` from, rather than erroring loudly.
 
 - copies files matching the configured patterns (`.env`/`.env.*` by
   default — see "Config file" below) from the main worktree into the
@@ -39,7 +39,7 @@ The manager terminal itself is never attached/replaced — after each pick
 it loops back to the fzf prompt so it stays open as your dedicated
 switcher. Press Esc/Ctrl-C at the picker to exit the manager loop.
 
-Only one wt-managed VS Code window and one iTerm2 window exist at a time:
+Only one ruori-managed VS Code window and one iTerm2 window exist at a time:
 switching worktrees reuses/refocuses the VS Code window and closes the
 previous iTerm2 window before opening a new one.
 
@@ -54,30 +54,30 @@ beat before it actually disappears. Either one, if it happens at the
 wrong moment, can look like "the previous worktree's window didn't
 close."
 
-`wt` logs every step of this — which window id it thinks is active,
+`ruori` logs every step of this — which window id it thinks is active,
 every close it attempts (with the exit code and whether the window was
 still open immediately afterward), and every window it opens (with the
 raw AppleScript response) — to
-`<git-common-dir>/wt-iterm.log`, e.g. run `git rev-parse --git-common-dir`
+`<git-common-dir>/ruori-iterm.log`, e.g. run `git rev-parse --git-common-dir`
 from any worktree of the repo to find it, or just watch for the
-"logging iTerm2 window open/close activity to ..." line `wt` prints on
+"logging iTerm2 window open/close activity to ..." line `ruori` prints on
 startup. It's appended to, not rotated or cleared automatically, so
 delete it yourself if it grows large. If you hit a leftover window
-again, that log is the place to look — it'll show whether `wt` thought
+again, that log is the place to look — it'll show whether `ruori` thought
 it closed the window (and iTerm2 just hadn't caught up yet) or never
 learned that window's id in the first place.
 
-The id of the window `wt` is currently tracking is also persisted, to
-`<git-common-dir>/wt-iterm-window`, so that **restarting `wt` doesn't
+The id of the window `ruori` is currently tracking is also persisted, to
+`<git-common-dir>/ruori-iterm-window`, so that **restarting `ruori` doesn't
 orphan the window it had open**. Before this, that id lived only in the
-running manager process: restarting `wt` (to pick up an update, say)
+running manager process: restarting `ruori` (to pick up an update, say)
 made the fresh process forget which window belonged to it, so the next
 switch skipped the close entirely and you ended up with two worktree
 windows on screen. The file records iTerm2's pid next to the id, and the
 id is only adopted on startup if iTerm2 hasn't restarted in the meantime
 and the window is still open — iTerm2 numbers windows from a counter
 that resets with the app, so an id from a previous run can name an
-unrelated window, and `wt` would rather leave a stray window for you to
+unrelated window, and `ruori` would rather leave a stray window for you to
 close than close the wrong one. Both non-adoptions are logged.
 
 **Whatever's running in a worktree keeps running when you switch away.**
@@ -87,7 +87,7 @@ view attached to that session), not the session itself. So Claude Code, a
 dev server, a build, a long-running script, etc. all keep running in the
 background; switching back to that worktree later reuses the same session
 right where you left it. If you want to actually stop something, kill
-its tmux session — either `tmux kill-session -t <name>` (see `wt list`
+its tmux session — either `tmux kill-session -t <name>` (see `ruori list`
 for session names), or right from the picker: highlight a worktree and
 press **Ctrl-X** to kill its tmux session without leaving the picker.
 The TMUX column updates immediately, and you can keep browsing — Enter
@@ -102,11 +102,11 @@ status, PR status, usage cost, path, and tmux session name — in a
 preview pane underneath the list.
 
 The row marked `*` is whichever worktree you last switched to — starting
-from the main worktree, by default, on a repo with no `wt` history yet.
-This is persisted on disk (`<git-common-dir>/wt-current-worktree`), so it
-carries over across separate runs of `wt`: quit the manager, come back
+from the main worktree, by default, on a repo with no `ruori` history yet.
+This is persisted on disk (`<git-common-dir>/ruori-current-worktree`), so it
+carries over across separate runs of `ruori`: quit the manager, come back
 later, and `*` still marks the worktree you were last working in rather
-than resetting. If that worktree gets deleted (`wt rm`/Ctrl-D) it falls
+than resetting. If that worktree gets deleted (`ruori rm`/Ctrl-D) it falls
 back to the main worktree. Distinct from `TMUX` = `active`, which just
 means a tmux session happens to be running there.
 
@@ -142,8 +142,8 @@ you right now, and which are just waiting around — without leaving the
 picker.
 
 This works by having several Claude Code hooks write status to a
-`.wt-claude-status` file right at the root of the worktree the session
-is running in, which `wt` reads. It's not just `UserPromptSubmit`/
+`.ruori-claude-status` file right at the root of the worktree the session
+is running in, which `ruori` reads. It's not just `UserPromptSubmit`/
 `Stop`: `Stop` fires the moment the *main* agent hands off to a
 subagent (Task tool), well before that subagent finishes, so
 `PreToolUse`/`PostToolUse` are also hooked to keep `busy` accurate for
@@ -151,11 +151,11 @@ the whole time a subagent is running; `PermissionRequest`/`Elicitation`
 drive the `waiting` state.
 
 **These hooks live entirely inside the repo's own container image** —
-baked into the Dockerfile by the `wt-setup-repo` skill that `wt init`
-installs (see "Setting up `wt` for a repo" below) — never in the
-host's own `~/.claude/settings.json`. `wt` itself never edits any Claude Code
+baked into the Dockerfile by the `ruori-setup-repo` skill that `ruori init`
+installs (see "Setting up `ruori` for a repo" below) — never in the
+host's own `~/.claude/settings.json`. `ruori` itself never edits any Claude Code
 config, on the host or otherwise; a repo not in container mode simply
-doesn't get this column, by design, rather than `wt` reaching into
+doesn't get this column, by design, rather than `ruori` reaching into
 your host Claude Code setup to provide it. Writing the status file
 *inside* the worktree (rather than some central location) means it's
 automatically gone when that worktree is removed — no separate cleanup
@@ -203,7 +203,7 @@ reload made the whole picker sluggish, so press **Ctrl-F** ("fetch")
 instead to refresh `PR` (and `USAGE`, see below — one key for both slow
 columns rather than a separate refresh per column); every other reload
 (Ctrl-R, Ctrl-X, Ctrl-D, looping back after a switch) reuses whatever
-Ctrl-F last fetched, cached on disk at `<git-common-dir>/wt-pr-status.cache`
+Ctrl-F last fetched, cached on disk at `<git-common-dir>/ruori-pr-status.cache`
 (shared by every worktree of the repo) so it survives across the `fzf
 reload`s each of those spawn as a fresh process. Until you press Ctrl-F
 at least once, `PR` shows `?` for everything, not `-` — see the `?`
@@ -227,17 +227,17 @@ the ones that belong to this repo's worktrees, which gets slower as
 your overall Claude Code history grows regardless of how many
 worktrees this repo has. **Ctrl-F** (the same key that refreshes `PR`)
 refreshes `USAGE` too; it's cached on disk at
-`<git-common-dir>/wt-usage-cost.cache` the same way `PR`'s cache works,
+`<git-common-dir>/ruori-usage-cost.cache` the same way `PR`'s cache works,
 keyed by worktree path (not branch, since the cost is tied to which
 directory the sessions ran in). Until you press Ctrl-F at least once,
 `USAGE` shows `?` for everything.
 
-`wt list` fetches both `PR` and `USAGE` fresh every time, since it's a
+`ruori list` fetches both `PR` and `USAGE` fresh every time, since it's a
 one-shot command rather than a hot reload loop.
 
 ## Creating a worktree
 
-`wt new <branch> [start-point]` creates a worktree and immediately
+`ruori new <branch> [start-point]` creates a worktree and immediately
 activates it — same env-file copy-in, tmux/container session, VS Code
 window, and iTerm2 window a picker selection would trigger, without
 needing to also fzf-pick the branch you just created afterward.
@@ -253,7 +253,7 @@ needing to also fzf-pick the branch you just created afterward.
   directory name is independent of the branch's own ref name).
   Nesting under the main tree risks tools that walk it (editors, build
   steps, `find`) picking up the new worktree's contents too.
-- Refuses if a worktree for that branch already exists (see `wt list`)
+- Refuses if a worktree for that branch already exists (see `ruori list`)
   or if the target path already exists on disk.
 
 **Ctrl-N** in the picker does the same from inside the manager loop:
@@ -263,14 +263,14 @@ activating it. Activation (tmux/container start, VS Code, iTerm2 window)
 stays in the main loop's `enter: switch` path so the single, persistent
 manager process remains the only thing that ever opens/closes the
 tracked iTerm2 window; press Enter on the new row to actually switch to
-it. `wt new` on the command line doesn't have this constraint (there's
+it. `ruori new` on the command line doesn't have this constraint (there's
 no already-running manager loop's window state to conflict with), so it
 activates the worktree immediately.
 
 ## Deleting a worktree
 
-`wt rm <branch>` (or **Ctrl-D** on the highlighted row in the picker)
-deletes a worktree and everything `wt` itself created for it:
+`ruori rm <branch>` (or **Ctrl-D** on the highlighted row in the picker)
+deletes a worktree and everything `ruori` itself created for it:
 
 1. kills its tmux session, if one is running
 2. `git worktree remove`s it — if git refuses (uncommitted/untracked
@@ -284,7 +284,7 @@ deletes a worktree and everything `wt` itself created for it:
 Every step that can destroy work — the worktree removal itself, forcing
 past git's refusal, and the branch deletion — has its own `[y/N]`
 confirmation prompt; nothing happens silently. The main worktree (the
-repo root) can't be deleted this way — `wt` refuses, same as `git
+repo root) can't be deleted this way — `ruori` refuses, same as `git
 worktree remove` would.
 
 ## Env files
@@ -292,13 +292,13 @@ worktree remove` would.
 `git worktree add` only checks out tracked files, so a new worktree
 starts with none of your gitignored, machine-local env files (`.env`,
 `.env.local`, etc.) — just any tracked template (`.env.example`) if the
-repo has one. On every switch, `wt` copies each file matching a
+repo has one. On every switch, `ruori` copies each file matching a
 configured pattern (see "Config file" below) found in the **main
 worktree** (the repo root — not necessarily the one you're switching
 *from*) into the target worktree, but only ones that don't already
 exist there. It never overwrites a file already present, so once a
 worktree has its own copy you can freely diverge it (e.g. a different
-port) without `wt` stomping on it on a later switch.
+port) without `ruori` stomping on it on a later switch.
 
 Dynamic port allocation (so worktrees don't collide on the same port)
 is handled by container mode's `container-port` directive, a separate
@@ -306,8 +306,8 @@ mechanism from env-file copying — see "Container mode" below.
 
 ## Config file
 
-`wt` looks for `.wt-orchestrator.conf` at the main worktree's root.
-It's created by you, not `wt` — if it doesn't exist, `wt` falls back to
+`ruori` looks for `.ruori.conf` at the main worktree's root.
+It's created by you, not `ruori` — if it doesn't exist, `ruori` falls back to
 copying just `.env`/`.env.*` (the previous hardcoded behavior).
 
 Each line is `<directive> <value>`. Blank lines and lines starting with
@@ -323,7 +323,7 @@ pattern relative to the repo root. A plain filename matches exactly
 `?`, `[...]`) work as well, including partway through a path:
 
 ```
-# .wt-orchestrator.conf — files to copy into a new worktree if missing
+# .ruori.conf — files to copy into a new worktree if missing
 copy .env
 copy .env.*
 copy config/local.json
@@ -333,8 +333,8 @@ copy secrets/*.local.yaml
 You (or an AI coding agent) can generate this file for a given repo —
 see `docs/agent-config-guide.md` for a self-contained set of
 instructions written for exactly that: point an agent at it, in
-whatever repo you want `wt` set up in, and it'll inspect that repo's
-`.gitignore`/config and write a sensible `.wt-orchestrator.conf`.
+whatever repo you want `ruori` set up in, and it'll inspect that repo's
+`.gitignore`/config and write a sensible `.ruori.conf`.
 
 Four more directives opt a repo into **container mode** (see
 "Container mode" below): `container`, `container-file`,
@@ -344,47 +344,47 @@ example — a repo with none of them behaves exactly as described above.
 
 The easiest way to get all of this (config file *and* Dockerfile *and*
 the Claude Code status hook baked into it) written for a repo in one
-shot is `wt init` — see "Setting up `wt` for a repo" below.
+shot is `ruori init` — see "Setting up `ruori` for a repo" below.
 
-## Setting up `wt` for a repo
+## Setting up `ruori` for a repo
 
-`wt init`, run once inside a repo, writes a Claude Code skill there:
-`.claude/skills/wt-setup-repo/SKILL.md`, containing the full,
+`ruori init`, run once inside a repo, writes a Claude Code skill there:
+`.claude/skills/ruori-setup-repo/SKILL.md`, containing the full,
 self-contained instructions from `docs/new-repo-setup-guide.md`
-(everything above: `.wt-orchestrator.conf`, the Dockerfile, and the
-container-only Claude Code status hook). `wt init` itself only writes
-that one file — it never touches `.wt-orchestrator.conf`, a
+(everything above: `.ruori.conf`, the Dockerfile, and the
+container-only Claude Code status hook). `ruori init` itself only writes
+that one file — it never touches `.ruori.conf`, a
 Dockerfile, Docker, or anything on your host's own Claude Code config.
 
 ```sh
 cd ~/git/some-repo
-wt init      # writes .claude/skills/wt-setup-repo/SKILL.md
-git add .claude && git commit -m "Add wt-setup-repo skill"
+ruori init   # writes .claude/skills/ruori-setup-repo/SKILL.md
+git add .claude && git commit -m "Add ruori-setup-repo skill"
 ```
 
 Then, in a normal Claude Code session in that repo (on your host — no
-container needed for this part), ask it to run the `wt-setup-repo`
-skill. It'll inspect the repo, propose `.wt-orchestrator.conf` and
+container needed for this part), ask it to run the `ruori-setup-repo`
+skill. It'll inspect the repo, propose `.ruori.conf` and
 Dockerfile contents (including the status hook), and write them once
 you confirm — see `docs/new-repo-setup-guide.md` for exactly what it
 does.
 
 Committing the skill means every contributor's Claude Code session in
 this repo can run it, not just yours — worth doing even if you're the
-only one setting `wt` up today.
+only one setting `ruori` up today.
 
 ## Container mode
 
-By default `wt` runs a worktree's tmux session — and everything
+By default `ruori` runs a worktree's tmux session — and everything
 started in it, including any coding agent run with permission checks
 disabled — directly on the host, with the same filesystem access as
-your user account. Adding `container on` to `.wt-orchestrator.conf`
+your user account. Adding `container on` to `.ruori.conf`
 moves *just* that tmux session (and everything run inside it) into a
-per-worktree Docker container instead: `wt`, iTerm2 window automation,
+per-worktree Docker container instead: `ruori`, iTerm2 window automation,
 and `code -r` all stay host-side and unchanged either way. The
 container only ever gets the worktree's own directory and the shared
 git common dir mounted — nothing else, ever, unless you explicitly list
-it via `container-copy`. `wt` never decides what runs inside the
+it via `container-copy`. `ruori` never decides what runs inside the
 container's tmux session — that's entirely up to your own
 `.devcontainer/Dockerfile` (its `CMD`/entrypoint, a tmux
 `default-command`, or you typing it by hand), which also makes this
@@ -393,7 +393,7 @@ work with any agent, or no agent at all.
 This also solves port collisions across concurrently-open worktrees:
 `container-port` directives get a freshly-allocated, worktree-specific
 host port each, published from the container and injected into its
-environment — run `wt ports` to see current allocations. `wt rm` tears
+environment — run `ruori ports` to see current allocations. `ruori rm` tears
 the container down and frees its ports along with everything else it
 already cleans up.
 
@@ -406,7 +406,7 @@ strictly opt-in, per repo.
 
 - `git`, `tmux`, `fzf`, `code` (VS Code CLI) on `PATH`
 - iTerm2, with **Settings > General > Magic > "Allow all apps to control
-  iTerm2 via AppleEvents"** enabled (needed for `wt` to open windows for you)
+  iTerm2 via AppleEvents"** enabled (needed for `ruori` to open windows for you)
 - `docker` on `PATH` — only required for a repo that opts into
   container mode (see "Container mode" above); repos that don't use it
   need no Docker installation at all
@@ -414,36 +414,36 @@ strictly opt-in, per repo.
 ## Install
 
 ```sh
-ln -s "$(pwd)/bin/wt" ~/.local/bin/wt   # or any dir on your PATH
+ln -s "$(pwd)/bin/ruori" ~/.local/bin/ruori   # or any dir on your PATH
 ```
 
 ## Usage
 
 ```sh
 cd ~/git/some-repo
-wt init        # one-time per repo: write the wt-setup-repo Claude Code
-               # skill — see "Setting up wt for a repo"
-wt list        # dashboard: which worktree you're in, branch, active tmux
-               # session?, session name, path, PR status, usage cost
-               # (fetches PR/usage fresh every time — it's a one-shot
-               # command, not a hot loop)
-wt new <branch> [start-point]
-               # create + activate a worktree for <branch> — see "Creating a worktree"
-wt rm <branch> # delete the worktree for <branch> — see "Deleting a worktree"
-wt details <branch-or-session>
-               # everything wt knows about one worktree: branch, current?,
-               # path, session name, active tmux?, CLAUDE status, PR, usage
-               # cost, and (container mode) Docker state/container id/image/ports
-wt ports       # dashboard of container-mode host-port allocations — see "Container mode"
-wt             # manager loop: pick a worktree, get an iTerm2 window for it, repeat
-               # in the picker: Enter switches, Ctrl-N creates a worktree
-               # (see "Creating a worktree"), Ctrl-X kills the highlighted
-               # worktree's tmux session in place, Ctrl-D deletes the
-               # highlighted worktree, Ctrl-R refreshes TMUX/CLAUDE, Ctrl-F
-               # fetches PR status + usage cost together (see "PR status"/
-               # "Usage cost" below — kept separate from Ctrl-R since both
-               # are slow); highlighting a row previews its path/session
-               # below the list
+ruori init        # one-time per repo: write the ruori-setup-repo Claude Code
+                  # skill — see "Setting up ruori for a repo"
+ruori list        # dashboard: which worktree you're in, branch, active tmux
+                  # session?, session name, path, PR status, usage cost
+                  # (fetches PR/usage fresh every time — it's a one-shot
+                  # command, not a hot loop)
+ruori new <branch> [start-point]
+                  # create + activate a worktree for <branch> — see "Creating a worktree"
+ruori rm <branch> # delete the worktree for <branch> — see "Deleting a worktree"
+ruori details <branch-or-session>
+                  # everything ruori knows about one worktree: branch, current?,
+                  # path, session name, active tmux?, CLAUDE status, PR, usage
+                  # cost, and (container mode) Docker state/container id/image/ports
+ruori ports       # dashboard of container-mode host-port allocations — see "Container mode"
+ruori             # manager loop: pick a worktree, get an iTerm2 window for it, repeat
+                  # in the picker: Enter switches, Ctrl-N creates a worktree
+                  # (see "Creating a worktree"), Ctrl-X kills the highlighted
+                  # worktree's tmux session in place, Ctrl-D deletes the
+                  # highlighted worktree, Ctrl-R refreshes TMUX/CLAUDE, Ctrl-F
+                  # fetches PR status + usage cost together (see "PR status"/
+                  # "Usage cost" below — kept separate from Ctrl-R since both
+                  # are slow); highlighting a row previews its path/session
+                  # below the list
 ```
 
 ## Roadmap (not yet built)

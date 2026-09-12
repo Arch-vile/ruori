@@ -1,6 +1,6 @@
-# wt-orchestrator — Next steps
+# ruori — Next steps
 
-Status: MVP works (`bin/wt list`, `bin/wt switch`) — fzf-pick a git worktree,
+Status: MVP works (`bin/ruori list`, `bin/ruori switch`) — fzf-pick a git worktree,
 create/reuse a tmux session running `claude --resume`, launch/focus VS Code,
 and pop an iTerm2 window for the session, looping back to the picker so the
 invoking terminal stays a persistent manager. See README.md for usage.
@@ -27,8 +27,8 @@ skips `bare` lines).
 
 The TRD's #1 daily pain point after context-switching itself.
 
-Done: on every switch, `wt` copies files matching patterns from
-`.wt-orchestrator.conf` (falling back to `.env`/`.env.*` if that file
+Done: on every switch, `ruori` copies files matching patterns from
+`.ruori.conf` (falling back to `.env`/`.env.*` if that file
 doesn't exist) from the main worktree into the target worktree if
 missing there (never overwriting an existing file) — see README.md
 "Env files" and "Config file".
@@ -39,14 +39,14 @@ and README.md "Container mode"): a repeatable `container-port`
 directive gets each port a freshly-allocated, worktree-specific host
 port, injected into the container's environment (never written to a
 file — a deliberately separate mechanism from the `.env` copying
-above). `wt ports` shows current allocations; `wt rm`/Ctrl-D releases
+above). `ruori ports` shows current allocations; `ruori rm`/Ctrl-D releases
 them. This superseded the `.env`-injection-only approach originally
 sketched here — see the plan doc's Context section for why.
 
 ## 3. AeroSpace workspace orchestration
 
 - Script AeroSpace CLI (`aerospace list-workspaces`, `aerospace
-  move-node-to-workspace`, etc.) so that after `wt switch`:
+  move-node-to-workspace`, etc.) so that after `ruori switch`:
   - the VS Code window and the tmux terminal window for the *active*
     worktree get moved to a dedicated workspace (e.g. always workspace 1).
   - windows belonging to the previously active worktree get moved out of
@@ -62,13 +62,13 @@ sketched here — see the plan doc's Context section for why.
 
 Done: a `CLAUDE` (busy/idle/-) column, via Claude Code's
 `UserPromptSubmit`/`Stop` hooks writing status to a small state file
-`wt` reads — see README.md "Claude busy/idle status". Container-mode
+`ruori` reads — see README.md "Claude busy/idle status". Container-mode
 only, by design: the hooks are baked into the repo's own Dockerfile
-(via `wt init` + the `wt-setup-repo` skill, see
+(via `ruori init` + the `ruori-setup-repo` skill, see
 `docs/new-repo-setup-guide.md`), never installed on the host. A repo
 not in container mode just always reads `-`.
 
-- `wt list` should also show port allocation (once #2 exists) and maybe
+- `ruori list` should also show port allocation (once #2 exists) and maybe
   last-modified/last-commit time per worktree, so it's a real "status"
   view, not just a branch/path table.
 - Consider a lightweight persistent TUI (still via fzf, or a small
@@ -78,7 +78,7 @@ not in container mode just always reads `-`.
 
 ## 5. Config
 
-Done: `.wt-orchestrator.conf` exists (simple line-based, `<directive>
+Done: `.ruori.conf` exists (simple line-based, `<directive>
 <value>` per line, extensible — see README.md "Config file"), with the
 `copy` directive for which files get copied into a new worktree, and
 (see #2 above) `container`/`container-file`/`container-port`/
@@ -86,7 +86,7 @@ Done: `.wt-orchestrator.conf` exists (simple line-based, `<directive>
 Still to add, as new directives in the same file: editor override
 (`code` vs `cursor` vs other), tmux post-create command in host mode
 (currently hardcoded to `claude --resume` — container mode has no such
-hardcoding at all, since `wt` never injects a command into a
+hardcoding at all, since `ruori` never injects a command into a
 container's tmux session, see README.md "Container mode").
 
 ## Explicitly out of scope for now
@@ -96,12 +96,12 @@ container's tmux session, see README.md "Container mode").
 
 ## Worktree creation — done
 
-`wt new <branch> [start-point]` creates a worktree (as a sibling of the
+`ruori new <branch> [start-point]` creates a worktree (as a sibling of the
 main worktree — `<main-worktree-parent>/<repo>.worktrees/<branch>`, never
 nested inside it) and immediately activates it via the same code path a
 picker selection uses (env-file copy-in, tmux/container session, VS
 Code, iTerm2 window) — see README.md "Creating a worktree". This
-reverses the earlier "out of scope" stance below: `wt` already owned
+reverses the earlier "out of scope" stance below: `ruori` already owned
 per-worktree setup (env copy, port allocation) keyed off the worktree
 path, so leaving creation to a separate `git worktree add` meant that
 setup didn't happen until the first switch anyway.
