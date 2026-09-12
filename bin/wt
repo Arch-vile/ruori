@@ -1,0 +1,1924 @@
+#!/usr/bin/env bash
+# wt - worktree context switcher (MVP)
+#
+# Run with no args in a terminal you keep open as your manager. Lists the
+# git worktrees of the current repo, lets you fzf-pick one, then per pick:
+#   - creates/reuses a named tmux session rooted in that worktree (a new
+#     session starts `claude --resume`; an existing one is left running)
+#   - opens/focuses a VS Code window rooted in that worktree
+#   - opens a new iTerm2 window attached to that tmux session
+# ...then loops back to the picker so this terminal stays the manager.
+#
+# Usage:
+#   wt                  manager loop: pick a worktree, get an iTerm2 window, repeat
+#   wt new <branch> [start-point]
+#                       create a sibling worktree for <branch> (new or existing)
+#                       and immediately activate it, same as picking it would
+#   wt list             just print worktrees + which ones have an active tmux session
+
+set -euo pipefail
+
+for cmd in git tmux fzf code osascript; do
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "wt: required command '$cmd' not found in PATH" >&2
+    exit 1
+  fi
+done
+
+# Resolved here (this script's own PATH), not left to be looked up again
+# inside the iTerm2 window's spawned process: iTerm2 runs a profile's
+# command directly rather than through a login shell, so it won't see
+# PATH additions from ~/.zshrc etc. (e.g. Homebrew's tmux at
+# /opt/homebrew/bin, which isn't on the default system PATH).
+tmux_bin="$(command -v tmux)"
+
+# Same reasoning as tmux_bin above, for the host-side `docker` the
+# container-mode attach command execs into — may be empty for a repo
+# that never uses container mode, which is fine, since only the
+# container-mode attach path in open_iterm_window_for ever reads it, and
+# require_docker_if_container_mode already guarantees it's resolvable by
+# then.
+docker_bin="$(command -v docker || true)"
+
+if ! git rev-parse --show-toplevel >/dev/null 2>&1; then
+  echo "wt: not inside a git repository" >&2
+  exit 1
+fi
+
+repo_root="$(git rev-parse --show-toplevel)"
+repo_name="$(basename "$repo_root")"
+
+# Default "current worktree" for the picker's marker column (see
+# marker_for) — the main worktree, since `wt` can only be launched from
+# there (see the check below). Overridden by load_current_worktree
+# (below main_worktree_path's own assignment) with whatever you last
+# switched to, possibly in a previous run of `wt` — this default is only
+# what a brand-new repo with no `wt` history yet would show.
+current_worktree_path="$repo_root"
+
+sanitize() {
+  # tmux session names: avoid '.' and ':' which have special meaning
+  printf '%s' "$1" | tr -c 'A-Za-z0-9_-' '-'
+}
+
+# Cache file recording, per worktree path, the epoch time it was last
+# activated (switched to — see save_activation_time, called from the
+# manager loop below). Drives sort_worktrees_by_activation, which the
+# picker/list use so the most recently activated worktree always sorts
+# first instead of whatever order `git worktree list` happens to return
+# (~creation order). Cached under the repo's common git dir, like the
+# current-worktree/PR/usage caches (see current_worktree_cache_file).
+activation_times_cache_file() {
+  local common_dir
+  common_dir="$(cd "$repo_root" && git rev-parse --git-common-dir 2>/dev/null)" || return 1
+  case "$common_dir" in
+    /*) ;;
+    *) common_dir="$repo_root/$common_dir" ;;
+  esac
+  printf '%s/wt-activation-times' "$common_dir"
+}
+
+declare -A activation_time_for_path
+
+load_activation_times() {
+  activation_time_for_path=()
+  local cache_file epoch path
+  cache_file="$(activation_times_cache_file)" || return 0
+  [ -f "$cache_file" ] || return 0
+  while IFS=$'\t' read -r epoch path; do
+    [ -n "$path" ] || continue
+    activation_time_for_path["$path"]="$epoch"
+  done <"$cache_file"
+}
+
+# Records that `path` was just activated, so it sorts to the top of
+# future picker/list views. Rewrites the whole cache file from the
+# in-memory map (rather than appending) so it can't grow unbounded and
+# never needs pruning when a worktree is later removed.
+save_activation_time() {
+  local path="$1" cache_file tmp p
+  cache_file="$(activation_times_cache_file)" || return 0
+  activation_time_for_path["$path"]="$(date +%s)"
+  tmp="$(mktemp -t wt-activation-times)"
+  for p in "${!activation_time_for_path[@]}"; do
+    printf '%s\t%s\n' "${activation_time_for_path[$p]}" "$p"
+  done >"$tmp"
+  mv "$tmp" "$cache_file"
+}
+
+# Reorders paths/branches (in place) so the most recently activated
+# worktree comes first, then next-most-recent, etc. Worktrees never
+# activated (epoch 0, the default) keep their relative
+# `git worktree list` order and sort after every activated one — `sort
+# -s` (stable) guarantees ties keep their input order rather than being
+# reversed by `-r`.
+sort_worktrees_by_activation() {
+  load_activation_times
+  local i epoch
+  local -a keyed=()
+  for i in "${!paths[@]}"; do
+    epoch="${activation_time_for_path[${paths[$i]}]:-0}"
+    keyed+=("${epoch}"$'\t'"${i}")
+  done
+  local -a sorted_indices=()
+  local idx
+  while IFS=$'\t' read -r _ idx; do
+    sorted_indices+=("$idx")
+  done < <(printf '%s\n' "${keyed[@]}" | sort -t $'\t' -k1,1nr -s)
+  local -a new_paths=() new_branches=()
+  for idx in "${sorted_indices[@]}"; do
+    new_paths+=("${paths[$idx]}")
+    new_branches+=("${branches[$idx]}")
+  done
+  paths=("${new_paths[@]}")
+  branches=("${new_branches[@]}")
+}
+
+# --- parse `git worktree list --porcelain` into parallel arrays ---
+# A function (not inline top-level code) because the worktree list can now
+# change mid-session — `wt rm`/Ctrl-D delete one — so the manager loop
+# re-parses on every iteration instead of trusting arrays built once at
+# startup, which would otherwise go stale and desync from what the picker
+# (each reload is its own fresh process, so it always sees current state)
+# is actually showing.
+parse_worktrees() {
+  paths=()
+  branches=()
+
+  local current_path="" current_branch="" current_head="" current_bare="0" have_entry=0
+
+  flush_entry() {
+    [ "$have_entry" -eq 1 ] || return 0
+    [ "$current_bare" = "1" ] && { have_entry=0; return 0; }
+    if [ -z "$current_branch" ]; then
+      # detached (or otherwise branchless) worktree: use short SHA, fall back
+      # to the worktree's directory name if HEAD is somehow unavailable.
+      if [ -n "$current_head" ]; then
+        current_branch="(detached@${current_head:0:8})"
+      else
+        current_branch="(detached:$(basename "$current_path"))"
+      fi
+    fi
+    paths+=("$current_path")
+    branches+=("$current_branch")
+    have_entry=0
+  }
+
+  while IFS= read -r line; do
+    case "$line" in
+      worktree\ *)
+        flush_entry
+        current_path="${line#worktree }"
+        current_branch=""
+        current_head=""
+        current_bare="0"
+        have_entry=1
+        ;;
+      branch\ *)
+        current_branch="${line#branch refs/heads/}"
+        ;;
+      HEAD\ *)
+        current_head="${line#HEAD }"
+        ;;
+      detached)
+        current_branch=""
+        ;;
+      bare)
+        current_bare="1"
+        ;;
+    esac
+  done < <(git worktree list --porcelain)
+  flush_entry
+
+  if [ "${#paths[@]}" -eq 0 ]; then
+    echo "wt: no worktrees found for $repo_root" >&2
+    exit 1
+  fi
+
+  # `git worktree list` always lists the main worktree first (the one with
+  # a real .git directory, as opposed to a linked worktree's .git file) —
+  # grab it before sort_worktrees_by_activation reorders paths/branches.
+  main_worktree_path="${paths[0]}"
+
+  sort_worktrees_by_activation
+}
+
+parse_worktrees
+
+# `wt` must be launched from the main worktree, not a linked one: several
+# things below key off `repo_root` (the tmux session-name prefix via
+# `repo_name`, the PR/usage/current-worktree cache file locations) on the
+# assumption that it's a single stable, repo-wide identity — but
+# `git rev-parse --show-toplevel` actually resolves to whichever
+# worktree's tree you're standing in when you run it. Launching from a
+# linked worktree would silently give those a different value each time
+# (e.g. tmux session names for the very same worktree changing depending
+# on where you happened to launch `wt` from), rather than failing loudly.
+if [ "$repo_root" != "$main_worktree_path" ]; then
+  echo "wt: must be run from the main worktree, not a linked one." >&2
+  echo "wt: you're in:    $repo_root" >&2
+  echo "wt: main worktree: $main_worktree_path" >&2
+  echo "wt: cd there and run wt again." >&2
+  exit 1
+fi
+
+# Per-repo config file, created by the user (wt never writes it) at the
+# main worktree's root. Each non-blank, non-comment (#) line is
+# "<directive> <value>" — e.g. "copy .env.*" — so the file can grow more
+# kinds of setting later (editor override, port base, ...) without
+# changing its shape; unrecognized directives are warned about and
+# skipped rather than breaking parsing.
+CONFIG_FILENAME=".wt-orchestrator.conf"
+
+# Emits "<directive>\t<value>" for each config line, trimmed and with
+# comments stripped. If the config file doesn't exist, emits nothing —
+# callers apply their own defaults in that case.
+config_directives() {
+  local config_file="$main_worktree_path/$CONFIG_FILENAME"
+  [ -f "$config_file" ] || return 0
+  local line key value
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%%#*}"
+    line="${line#"${line%%[![:space:]]*}"}"   # trim leading whitespace
+    line="${line%"${line##*[![:space:]]}"}"   # trim trailing whitespace
+    [ -n "$line" ] || continue
+    read -r key value <<<"$line"
+    printf '%s\t%s\n' "$key" "$value"
+  done <"$config_file"
+}
+
+# All directive keys any accessor below understands. Checked once here
+# (warn_unknown_directives) rather than in copy_patterns itself, since
+# copy_patterns is no longer the only consumer of config_directives —
+# each new accessor (container_mode_enabled, container_file_path,
+# container_ports, container_copy_entries) matches only its own key(s),
+# so this is the single shared place unrecognized keys get flagged.
+KNOWN_CONFIG_DIRECTIVES="copy container container-file container-port container-copy"
+
+warn_unknown_directives() {
+  local key value known k
+  while IFS=$'\t' read -r key value; do
+    known=0
+    for k in $KNOWN_CONFIG_DIRECTIVES; do
+      [ "$key" = "$k" ] && { known=1; break; }
+    done
+    [ "$known" = "1" ] || echo "wt: ${CONFIG_FILENAME}: unknown directive '$key' (ignored)" >&2
+  done < <(config_directives)
+}
+
+# The "copy" directive's values: glob patterns (relative to the main
+# worktree root) of files to copy into a worktree missing them. Plain
+# filenames match exactly (a full path, e.g. "config/local.json", too);
+# shell wildcards (*, ?, [...]) work as well, including partway through
+# a path (e.g. "config/*.local.json"). Falls back to .env/.env.* when
+# there's no config file at all.
+copy_patterns() {
+  local config_file="$main_worktree_path/$CONFIG_FILENAME"
+  if [ ! -f "$config_file" ]; then
+    printf '%s\n' '.env' '.env.*'
+    return 0
+  fi
+  local key value
+  while IFS=$'\t' read -r key value; do
+    [ "$key" = "copy" ] || continue
+    [ -n "$value" ] && printf '%s\n' "$value"
+  done < <(config_directives)
+}
+
+# `container on` (bare `container`, i.e. an empty value, also works) is
+# the sole container-mode opt-in signal — see
+# docs/container-sandbox-plan.md decision I. A Dockerfile existing on
+# disk is deliberately NOT treated as opt-in: a repo could have an
+# unrelated pre-existing .devcontainer/Dockerfile.
+container_mode_enabled() {
+  local key value
+  while IFS=$'\t' read -r key value; do
+    if [ "$key" = "container" ]; then
+      case "$value" in
+        ''|on) return 0 ;;
+        off) return 1 ;;
+      esac
+    fi
+  done < <(config_directives)
+  return 1
+}
+
+CONTAINER_FILE_DEFAULT=".devcontainer/Dockerfile"
+
+# `container-file <path>` — Dockerfile path relative to the main
+# worktree root; defaults to CONTAINER_FILE_DEFAULT if not given.
+container_file_path() {
+  local key value result="$CONTAINER_FILE_DEFAULT"
+  while IFS=$'\t' read -r key value; do
+    [ "$key" = "container-file" ] && [ -n "$value" ] && result="$value"
+  done < <(config_directives)
+  printf '%s' "$result"
+}
+
+# One "<container-port>\t<name>" line per `container-port <port>[:<name>]`
+# directive, in config order (<name> empty when no ":<name>" was given).
+container_ports() {
+  local key value port name
+  while IFS=$'\t' read -r key value; do
+    [ "$key" = "container-port" ] || continue
+    [ -n "$value" ] || continue
+    port="${value%%:*}"
+    if [ "$value" = "$port" ]; then
+      name=""
+    else
+      name="${value#*:}"
+    fi
+    printf '%s\t%s\n' "$port" "$name"
+  done < <(config_directives)
+}
+
+# One "<host-path>\t<container-path>" line per `container-copy
+# <host-path>[:<container-path>]` directive (<container-path> defaults to
+# <host-path> when no ":<container-path>" was given). Only a literal
+# leading "~/" is expanded (to $HOME) — no eval/arbitrary shell expansion
+# of a value that comes straight from a config file, so a crafted config
+# can't execute anything at parse time.
+container_copy_entries() {
+  local key value host_path container_path has_container_path=0
+  while IFS=$'\t' read -r key value; do
+    [ "$key" = "container-copy" ] || continue
+    [ -n "$value" ] || continue
+    host_path="${value%%:*}"
+    if [ "$value" = "$host_path" ]; then
+      has_container_path=0
+    else
+      container_path="${value#*:}"
+      has_container_path=1
+    fi
+    # Only ~/ in host_path means anything to expand here — $HOME is a
+    # host concept; a "~/..." container_path is used as a literal path
+    # (the container's own filesystem layout, likely a different user
+    # entirely, e.g. /root), never expanded against the host's $HOME.
+    case "$host_path" in
+      '~/'*) host_path="$HOME/${host_path#'~/'}" ;;
+    esac
+    # No explicit container-path: mirror the (now-expanded) host path
+    # verbatim inside the container, same "matching paths" convention
+    # the worktree/git-common-dir mounts already use.
+    [ "$has_container_path" = "1" ] || container_path="$host_path"
+    printf '%s\t%s\n' "$host_path" "$container_path"
+  done < <(config_directives)
+}
+
+# Copy any files matching the configured patterns (see copy_patterns/
+# CONFIG_FILENAME above) from the main worktree into the target worktree,
+# skipping ones that already exist there (never overwrites — e.g. a
+# tracked .env.example that git worktree already checked out).
+# Gitignored, machine-local files aren't part of the checkout, so a fresh
+# worktree otherwise starts with none of them.
+sync_env_files() {
+  local target_path="$1"
+  [ "$target_path" = "$main_worktree_path" ] && return 0
+
+  local pattern f rel target_file
+  while IFS= read -r pattern; do
+    [ -n "$pattern" ] || continue
+    for f in "$main_worktree_path"/$pattern; do
+      [ -f "$f" ] || continue
+      rel="${f#"$main_worktree_path"/}"
+      target_file="$target_path/$rel"
+      if [ ! -e "$target_file" ]; then
+        mkdir -p "$(dirname "$target_file")"
+        cp "$f" "$target_file"
+        echo "wt: copied $rel into worktree"
+      fi
+    done
+  done < <(copy_patterns)
+}
+
+path_hash_for() {
+  printf '%s' "$1" | cksum | cut -d' ' -f1
+}
+
+session_name_for() {
+  local branch="$1"
+  local path="$2"
+  # Include a short hash of the full path as a uniqueness suffix, since
+  # sanitize() is lossy (e.g. 'feat/a' and 'feat-a' both become 'feat-a')
+  # and detached/no-branch worktrees could otherwise still collide.
+  echo "$(sanitize "$repo_name")__$(sanitize "$branch")__$(path_hash_for "$path")"
+}
+
+# --- container mode (see docs/container-sandbox-plan.md) ---
+#
+# `wt` never decides what runs inside a container's tmux session (see
+# the main loop below) — this section only orchestrates the container's
+# own lifecycle: image build, start/stop, mounts, ports, copy-in.
+
+# Absolute path to this repo's shared git common dir (where linked
+# worktrees' actual .git data lives) — one of the two paths bind-mounted
+# into a container (the other being the worktree's own directory),
+# required so a worktree's .git file (which points at an absolute host
+# path inside this dir) resolves the same way inside the container.
+git_common_dir() {
+  local common_dir
+  common_dir="$(cd "$repo_root" && git rev-parse --git-common-dir 2>/dev/null)" || return 1
+  case "$common_dir" in
+    /*) ;;
+    *) common_dir="$repo_root/$common_dir" ;;
+  esac
+  printf '%s' "$common_dir"
+}
+
+# One image per repo (not per worktree) — the Dockerfile is the same
+# file regardless of which worktree uses it; only mounts/ports differ
+# per container instance.
+#
+# Lowercased on top of sanitize(): Docker repository names must be
+# lowercase (unlike the tmux/container names sanitize() is normally used
+# for, which tolerate mixed case), so a repo like "packPixie" would
+# otherwise fail the build with "repository name must be lowercase".
+container_image_for() {
+  printf 'wt/%s:latest' "$(sanitize "$repo_name" | tr 'A-Z' 'a-z')"
+}
+
+container_running() {
+  [ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = "true" ]
+}
+
+# Distinguishes "stopped, needs `docker start`" from "never created,
+# needs `docker run`" — a container can outlive a host reboot as a
+# stopped object.
+container_exists() {
+  docker inspect "$1" >/dev/null 2>&1
+}
+
+# "running" / "stopped" / "none" for the container named $1 (the session
+# name — one container per worktree). Used by the picker's status column
+# and preview panel in container mode; ctrl-x there does `docker stop`,
+# so "stopped" is exactly what a picker refresh shows right after.
+container_state_for() {
+  if container_running "$1"; then
+    echo "running"
+  elif container_exists "$1"; then
+    echo "stopped"
+  else
+    echo "none"
+  fi
+}
+
+# One repo-wide image (see container_image_for), so this is the same for
+# every row in the picker — called once per draw, not per worktree.
+container_image_info_for() {
+  local image
+  image="$(container_image_for)"
+  if docker image inspect "$image" >/dev/null 2>&1; then
+    printf '%s (built)' "$image"
+  else
+    printf '%s (not built)' "$image"
+  fi
+}
+
+# Short (12-char) container id for session $1, or "-" if the container
+# doesn't exist yet. Shown next to the container name in the preview panel.
+container_id_for() {
+  local id
+  id="$(docker inspect -f '{{.Id}}' "$1" 2>/dev/null)"
+  if [ -n "$id" ]; then
+    printf '%s' "${id:0:12}"
+  else
+    printf '%s' "-"
+  fi
+}
+
+# Host->container port mappings actually allocated for session $1 (see
+# allocate_port_for/ports_cache_file), comma-separated, or "-" if none.
+container_ports_info_for() {
+  local session="$1" cache_file s cp hp parts=()
+  cache_file="$(ports_cache_file)" || { echo "-"; return; }
+  [ -f "$cache_file" ] || { echo "-"; return; }
+  while IFS=$'\t' read -r s cp hp; do
+    [ "$s" = "$session" ] || continue
+    parts+=("${hp}->${cp}")
+  done <"$cache_file"
+  if [ "${#parts[@]}" -eq 0 ]; then
+    echo "-"
+  else
+    local IFS=,
+    echo "${parts[*]}"
+  fi
+}
+
+# Always invokes `docker build`, letting Docker's own layer cache keep
+# repeat builds fast, rather than hand-rolling a staleness heuristic
+# that could miss a file the Dockerfile COPYs.
+container_build_if_needed() {
+  local image dockerfile
+  image="$(container_image_for)"
+  dockerfile="$main_worktree_path/$(container_file_path)"
+  if [ ! -f "$dockerfile" ]; then
+    echo "wt: container mode: Dockerfile not found at $dockerfile (see 'container-file' in ${CONFIG_FILENAME})" >&2
+    return 1
+  fi
+  echo "wt: building container image $image" >&2
+  docker build -t "$image" -f "$dockerfile" "$main_worktree_path"
+}
+
+# New state file, same convention as the other per-repo caches below
+# (keyed on the common git dir): one line per
+# "<session_name>\t<container_port>\t<host_port>".
+ports_cache_file() {
+  local common_dir
+  common_dir="$(git_common_dir)" || return 1
+  printf '%s/wt-ports' "$common_dir"
+}
+
+CONTAINER_PORT_BASE=20000
+CONTAINER_PORT_RANGE=10000
+
+# Best-effort: true if something is already listening on 127.0.0.1:$1.
+# Silently reports "not in use" if `lsof` isn't installed — this is only
+# an extra safety check on top of allocate_port_for's own bookkeeping,
+# not something worth adding a hard dependency for.
+port_in_use() {
+  command -v lsof >/dev/null 2>&1 || return 1
+  lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
+}
+
+# Deterministic starting point for a (session, container_port) pair's
+# port scan, derived from a hash of both rather than always the same
+# fixed base. This is what actually keeps different *repos* out of each
+# other's way: the ports cache is per-repo (see ports_cache_file), so
+# nothing here knows about another repo's allocations directly — without
+# this, every repo's first container-port allocation would start
+# scanning from the exact same number, clustering everyone at the low
+# end of the range and making it likely that a *stopped* container's
+# already-baked-in host port (never re-verified on `docker start` — see
+# container_start_if_needed) gets silently claimed by an unrelated repo
+# in the meantime, so restarting the first one later fails with Docker's
+# own "port is already allocated". Seeding from identity spreads
+# allocations across the whole range instead, so that only matters if
+# two different worktrees happen to hash to the same seed *and* both are
+# live at the same moment — rare rather than the common case. It doesn't
+# make the race impossible, just unlikely; see docs/container-sandbox-plan.md.
+port_seed_for() {
+  local hash
+  hash="$(printf '%s' "$1" | cksum | cut -d' ' -f1)"
+  printf '%s' "$((CONTAINER_PORT_BASE + hash % CONTAINER_PORT_RANGE))"
+}
+
+# Reuses an existing row for this (session, container_port) pair if
+# present (idempotent across `wt` restarts and container stop/start);
+# otherwise scans forward from port_seed_for's hash-derived starting
+# point for the first port that's both unused in this repo's own cache
+# and not actually bound on the host, appends a new row, and returns it.
+allocate_port_for() {
+  local session="$1" container_port="$2" cache_file s cp hp candidate
+  cache_file="$(ports_cache_file)" || return 1
+
+  if [ -f "$cache_file" ]; then
+    while IFS=$'\t' read -r s cp hp; do
+      if [ "$s" = "$session" ] && [ "$cp" = "$container_port" ]; then
+        printf '%s' "$hp"
+        return 0
+      fi
+    done <"$cache_file"
+  fi
+
+  local -A used_host_ports=()
+  if [ -f "$cache_file" ]; then
+    while IFS=$'\t' read -r s cp hp; do
+      [ -n "$hp" ] && used_host_ports["$hp"]=1
+    done <"$cache_file"
+  fi
+
+  candidate="$(port_seed_for "${session}:${container_port}")"
+  while [ -n "${used_host_ports[$candidate]:-}" ] || port_in_use "$candidate"; do
+    candidate=$((candidate + 1))
+  done
+
+  printf '%s\t%s\t%s\n' "$session" "$container_port" "$candidate" >>"$cache_file"
+  printf '%s' "$candidate"
+}
+
+# Strips every row for $1 (a session name) from the ports state file —
+# called from teardown (wt rm / Ctrl-D) so freed ports aren't shown as
+# allocated by `wt ports` or reused by a later, unrelated worktree.
+release_ports_for() {
+  local session="$1" cache_file tmp
+  cache_file="$(ports_cache_file)" || return 0
+  [ -f "$cache_file" ] || return 0
+  tmp="$(mktemp -t wt-ports)"
+  grep -v "^${session}	" "$cache_file" >"$tmp" 2>/dev/null || true
+  mv "$tmp" "$cache_file"
+}
+
+# running -> no-op; stopped -> `docker start`; absent -> build-if-needed
+# then `docker run -d ... sleep infinity` (a durable PID 1; tmux
+# sessions live inside via `docker exec`, never as the container's main
+# process) with the worktree + git common dir bind-mounted at matching
+# host paths and one -p/-e pair per configured container-port. Copy-in
+# (container-copy) only ever runs in the "container just created"
+# branch — a stopped-then-restarted container is never re-copied into,
+# which is what makes "delete the container to refresh its copied
+# config" a meaningful, predictable action.
+container_start_if_needed() {
+  local session="$1" path="$2" common_dir
+  # Separate statement: within one `local a=... b=$a` command, bash
+  # expands every RHS (including `$a`) *before* any of the assignments
+  # take effect, so `$session` here would still see whatever `session`
+  # was in the caller's scope (unset, under `set -u`) rather than $1.
+  local name="$session"
+
+  container_running "$name" && return 0
+
+  if container_exists "$name"; then
+    docker start "$name" >/dev/null
+    return 0
+  fi
+
+  common_dir="$(git_common_dir)" || { echo "wt: container mode: could not resolve git common dir" >&2; return 1; }
+  container_build_if_needed || return 1
+
+  local -a port_flags=()
+  local container_port port_name host_port env_name
+  while IFS=$'\t' read -r container_port port_name; do
+    [ -n "$container_port" ] || continue
+    host_port="$(allocate_port_for "$name" "$container_port")"
+    env_name="${port_name:-PORT_${container_port}}"
+    port_flags+=(-p "127.0.0.1:${host_port}:${container_port}" -e "${env_name}=${host_port}")
+  done < <(container_ports)
+
+  echo "wt: creating container $name" >&2
+  docker run -d --name "$name" \
+    -v "$path:$path" \
+    -v "$common_dir:$common_dir" \
+    "${port_flags[@]}" \
+    "$(container_image_for)" sleep infinity >/dev/null
+
+  local host_path container_path
+  while IFS=$'\t' read -r host_path container_path; do
+    [ -n "$host_path" ] || continue
+    if [ -e "$host_path" ]; then
+      docker cp "$host_path" "$name:$container_path"
+    else
+      echo "wt: container-copy: host path not found, skipping: $host_path" >&2
+    fi
+  done < <(container_copy_entries)
+}
+
+# True if a tmux session named $2 exists — checked inside the named
+# container via `docker exec` when $1 (use_container) is "1", or on the
+# host tmux server directly (today's behavior) otherwise. Container mode
+# is opt-in per repo (never per worktree), so callers always pass the
+# single repo-wide $CONTAINER_MODE flag here.
+tmux_has_session() {
+  local use_container="$1" session="$2"
+  if [ "$use_container" = "1" ]; then
+    docker exec "$session" tmux has-session -t "$session" 2>/dev/null
+  else
+    tmux has-session -t "$session" 2>/dev/null
+  fi
+}
+
+require_docker_if_container_mode() {
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "wt: required command 'docker' not found in PATH (needed because ${CONFIG_FILENAME} has 'container on')" >&2
+    exit 1
+  fi
+}
+
+# Filename wt-claude-status-hook (see docs/agent-hooks-setup-guide.md)
+# writes at the root of the worktree it's running in — the two sides
+# only need to agree on this name, not on any shared central location.
+# It must be excluded via the user's GLOBAL gitignore, not a per-repo
+# one — see the setup guide.
+CLAUDE_STATUS_FILENAME=".wt-claude-status"
+
+# Same host/container-transparent trick as CLAUDE_STATUS_FILENAME above,
+# extended to carry usage data (see docs/container-sandbox-plan.md
+# section J): a two-line "<cost_usd>\n<epoch>\n" file at the worktree
+# root, written by whatever agent's own hook runs there — inside a
+# container in container mode, this bind-mounted path is the only
+# reliable way for the host-side USAGE column to see it, since
+# ~/.claude/projects lives inside the container's own filesystem and is
+# never live-mounted. Generic, agent-owned extension point: `wt` reads
+# it without knowing (or caring) which agent wrote it.
+AGENT_USAGE_FILENAME=".wt-agent-usage"
+
+# How stale an AGENT_USAGE_FILENAME reading can be before usage_cost_for
+# ignores it and falls back to the host-side jsonl scan instead — guards
+# against showing a frozen number from a long-abandoned container/hook
+# setup as if it were still live. 30 days, generous on purpose: this
+# file is only ever a stand-in for the host scan, not a replacement for
+# it, so a rare stale read just means one worktree briefly shows the
+# host-side value instead.
+AGENT_USAGE_STALE_SECS=$((30 * 24 * 60 * 60))
+
+# "busy"/"idle" from the most recent hook event for this worktree, or
+# "-" if the hook has never fired for it (not configured, or no Claude
+# Code session has run there since the hook was set up). Only makes
+# sense while a tmux session is actually alive for that worktree, so
+# callers should gate on that themselves (a killed session can leave a
+# stale "busy"/"idle" file behind — this function doesn't know that).
+claude_status_for() {
+  local path="$1" f
+  f="$path/$CLAUDE_STATUS_FILENAME"
+  [ -f "$f" ] && head -n1 "$f" || echo "-"
+}
+
+# Maps branch name -> PR status string. Populated either from the on-disk
+# cache (load_pr_status_cache — instant, used on every draw/reload) or
+# freshly from `gh` (fetch_pr_statuses — slow, one or more network calls,
+# only triggered by Ctrl-F; see below). A branch with no entry shows as
+# "-" (fetched at least once, just no PR for this branch) or "?" (never
+# fetched at all — see pr_status_ever_fetched) wherever it's read.
+declare -A pr_status_map
+
+# Whether a PR-status fetch has ever completed for this repo (this
+# machine, ever — not just this process): true as soon as either the
+# on-disk cache file exists (load_pr_status_cache found one) or a fetch
+# just ran (fetch_pr_statuses always ends by writing the cache file, so
+# it's true regardless of whether the fetch itself actually found
+# anything). Lets pr_status_for tell "no PR" apart from "no one's
+# checked yet" instead of showing "-" for both.
+pr_status_ever_fetched=0
+
+# Each `reload(bash wt __fzfgen...)` binding runs in a brand-new bash
+# process (fzf shells out), so pr_status_map can't just live in memory
+# between reloads the way it does across the manager's own while-loop
+# iterations — it has to round-trip through a file. Cached under the
+# repo's *common* git dir (not the worktree-specific one) so every
+# worktree of this repo shares one PR-status cache, keyed on branch name.
+pr_status_cache_file() {
+  local common_dir
+  common_dir="$(cd "$repo_root" && git rev-parse --git-common-dir 2>/dev/null)" || return 1
+  case "$common_dir" in
+    /*) ;;
+    *) common_dir="$repo_root/$common_dir" ;;
+  esac
+  printf '%s/wt-pr-status.cache' "$common_dir"
+}
+
+save_pr_status_cache() {
+  local cache_file branch
+  cache_file="$(pr_status_cache_file)" || return 0
+  : >"$cache_file"
+  for branch in "${!pr_status_map[@]}"; do
+    printf '%s\t%s\n' "$branch" "${pr_status_map[$branch]}" >>"$cache_file"
+  done
+}
+
+# Fast, no network: loads whatever fetch_pr_statuses last wrote to disk
+# (empty/missing cache just means every branch reads as "-"). Called on
+# every picker draw/reload so the PR column always reflects the last
+# Ctrl-F fetch instead of resetting each time.
+load_pr_status_cache() {
+  pr_status_map=()
+  pr_status_ever_fetched=0
+  local cache_file branch status
+  cache_file="$(pr_status_cache_file)" || return 0
+  [ -f "$cache_file" ] || return 0
+  pr_status_ever_fetched=1
+  while IFS=$'\t' read -r branch status; do
+    [ -n "$branch" ] || continue
+    pr_status_map["$branch"]="$status"
+  done <"$cache_file"
+}
+
+# Rank of each pr_status_for value, highest first — used only to resolve
+# the rare case of a branch matching more than one PR (e.g. a merged PR
+# whose branch got reused for a new one): the highest-ranked match wins,
+# regardless of which one `gh pr list` happened to return first. Open,
+# actionable states outrank merged, which outranks closed-without-merge.
+pr_status_rank() {
+  case "$1" in
+    unresolved) echo 5 ;;
+    changes) echo 4 ;;
+    pending) echo 3 ;;
+    approved) echo 3 ;;
+    draft) echo 2 ;;
+    merged) echo 1 ;;
+    closed) echo 0 ;;
+    *) echo -1 ;;
+  esac
+}
+
+# Populates pr_status_map with one `gh pr list --head <branch> --state
+# all` call per worktree branch (plus one reviewThreads query per *open,
+# non-draft* match, to find unresolved comments — merged/closed PRs skip
+# that call entirely, since it's meaningless for them), and persists the
+# result via save_pr_status_cache. Deliberately per-branch rather than
+# one repo-wide `gh pr list` call: a single call needs a --limit, and on
+# an active repo the most-recent-N PRs can fail to include an older
+# worktree branch's PR entirely (a merged PR from a few weeks back can
+# already be outside the 200 most recent PRs on a busy repo) — silently
+# showing "-" instead of "merged" for a perfectly real PR, not just slow.
+# Per-branch lookups are always correct regardless of the repo's total PR
+# history size, at the cost of more (still cheap, targeted) `gh` calls.
+# Slow either way (one or more network round-trips) — only ever called
+# from Ctrl-F (__fzfgen_fetch), never from the regular draw/reload path.
+# Silently leaves pr_status_map empty on any failure (gh/jq missing, no
+# remote, not authenticated, offline, ...) since the PR column is a
+# best-effort extra, not something worth failing the picker over.
+fetch_pr_statuses() {
+  pr_status_map=()
+  pr_status_ever_fetched=1
+  command -v gh >/dev/null 2>&1 || { save_pr_status_cache; return 0; }
+  command -v jq >/dev/null 2>&1 || { save_pr_status_cache; return 0; }
+
+  local repo owner name
+  repo="$(cd "$repo_root" && gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)" || { save_pr_status_cache; return 0; }
+  [ -n "$repo" ] || { save_pr_status_cache; return 0; }
+  owner="${repo%%/*}"
+  name="${repo#*/}"
+
+  local branch pr_json number is_draft review_decision pr_state unresolved status existing
+  for branch in "${branches[@]}"; do
+    case "$branch" in
+      '('*')') continue ;;  # detached worktree placeholder — no real branch to look up a PR for
+    esac
+    [ -z "${pr_status_map[$branch]:-}" ] || continue  # already resolved (e.g. two worktrees somehow on the same branch)
+
+    pr_json="$(cd "$repo_root" && gh pr list --state all --head "$branch" --json number,isDraft,reviewDecision,state --limit 5 2>/dev/null)" || continue
+    [ -n "$pr_json" ] && [ "$pr_json" != "[]" ] || continue
+
+    while IFS=$'\t' read -r number is_draft review_decision pr_state; do
+      [ -n "$number" ] || continue
+      case "$pr_state" in
+        MERGED) status="merged" ;;
+        CLOSED) status="closed" ;;
+        *)
+          if [ "$is_draft" = "true" ]; then
+            status="draft"
+          else
+            unresolved="$(gh api graphql \
+              -f query='query($owner:String!,$name:String!,$number:Int!){
+                repository(owner:$owner,name:$name){
+                  pullRequest(number:$number){
+                    reviewThreads(first:100){ nodes { isResolved } }
+                  }
+                }
+              }' -F owner="$owner" -F name="$name" -F number="$number" \
+              --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved==false)] | length' \
+              2>/dev/null)" || true
+            case "$unresolved" in
+              ''|*[!0-9]*) unresolved=0 ;;
+            esac
+            if [ "$unresolved" -gt 0 ]; then
+              status="unresolved"
+            else
+              case "$review_decision" in
+                APPROVED) status="approved" ;;
+                CHANGES_REQUESTED) status="changes" ;;
+                *) status="pending" ;;
+              esac
+            fi
+          fi
+          ;;
+      esac
+      # A branch can (rarely) match more than one PR (e.g. a merged PR
+      # whose branch got reused for a new one) — keep the
+      # highest-ranked, most-actionable match rather than whichever
+      # `gh` happened to list first.
+      existing="${pr_status_map[$branch]:-}"
+      if [ -z "$existing" ] || [ "$(pr_status_rank "$status")" -gt "$(pr_status_rank "$existing")" ]; then
+        pr_status_map["$branch"]="$status"
+      fi
+    done < <(printf '%s' "$pr_json" | jq -r '.[] | [(.number|tostring), (.isDraft|tostring), (.reviewDecision // ""), .state] | @tsv')
+  done
+
+  save_pr_status_cache
+}
+
+pr_status_for() {
+  local branch="$1" status="${pr_status_map["$1"]:-}"
+  [ -n "$status" ] && { printf '%s' "$status"; return 0; }
+  [ "$pr_status_ever_fetched" = "1" ] && printf '%s' '-' || printf '%s' '?'
+}
+
+# Maps worktree path -> total Claude Code cost in USD (as a plain decimal
+# string, e.g. "34.81"), i.e. the same number `/usage` shows, summed
+# across every Claude Code session ever run with that path as its cwd.
+# Keyed by path rather than branch (unlike pr_status_map) since Claude
+# sessions are tied to the worktree's directory, not its branch. Same
+# on-disk-cache/fetch split and rationale as pr_status_map — see above —
+# except the cost comes from local transcript files (~/.claude/projects),
+# not the network, but scanning ALL of a heavy user's Claude Code history
+# to find the sessions for these worktrees is still slow enough (all
+# session files get scanned once per fetch) to want an explicit trigger
+# rather than doing it on every draw/reload.
+declare -A usage_cost_map
+
+# Same "never fetched" vs "fetched, no value" distinction as
+# pr_status_ever_fetched, for the USAGE column.
+usage_cost_ever_fetched=0
+
+usage_cost_cache_file() {
+  local common_dir
+  common_dir="$(cd "$repo_root" && git rev-parse --git-common-dir 2>/dev/null)" || return 1
+  case "$common_dir" in
+    /*) ;;
+    *) common_dir="$repo_root/$common_dir" ;;
+  esac
+  printf '%s/wt-usage-cost.cache' "$common_dir"
+}
+
+save_usage_cost_cache() {
+  local cache_file path
+  cache_file="$(usage_cost_cache_file)" || return 0
+  : >"$cache_file"
+  for path in "${!usage_cost_map[@]}"; do
+    printf '%s\t%s\n' "$path" "${usage_cost_map[$path]}" >>"$cache_file"
+  done
+}
+
+# Fast, no filesystem scan of ~/.claude: loads whatever fetch_usage_costs
+# last wrote to disk. Called on every picker draw/reload, same as
+# load_pr_status_cache.
+load_usage_cost_cache() {
+  usage_cost_map=()
+  usage_cost_ever_fetched=0
+  local cache_file path cost
+  cache_file="$(usage_cost_cache_file)" || return 0
+  [ -f "$cache_file" ] || return 0
+  usage_cost_ever_fetched=1
+  while IFS=$'\t' read -r path cost; do
+    [ -n "$path" ] || continue
+    usage_cost_map["$path"]="$cost"
+  done <"$cache_file"
+}
+
+# Scans every top-level Claude Code session transcript
+# (~/.claude/projects/*/*.jsonl — deliberately not the */subagents/*.jsonl
+# ones nested under a session: those never carry their own "cost-state"
+# line, since their cost is already rolled into the parent session's) for
+# ones whose cwd matches one of this repo's worktree paths, and sums each
+# matching file's last "cost-state" line's totalCostUSD (that field is
+# already a running total for the session, so only the last one per file
+# counts). Persists via save_usage_cost_cache. Silently leaves
+# usage_cost_map empty if `jq` is missing or there's no
+# ~/.claude/projects directory (e.g. Claude Code hooks were never used
+# here) — best-effort extra, like the PR column.
+fetch_usage_costs() {
+  usage_cost_map=()
+  usage_cost_ever_fetched=1
+  command -v jq >/dev/null 2>&1 || { save_usage_cost_cache; return 0; }
+
+  local projects_dir="$HOME/.claude/projects"
+  [ -d "$projects_dir" ] || { save_usage_cost_cache; return 0; }
+
+  # Fast membership check so we skip the (more expensive) cost extraction
+  # for the many session files that belong to other repos entirely.
+  local -A wanted_paths=()
+  local p
+  for p in "${paths[@]}"; do
+    wanted_paths["$p"]=1
+  done
+
+  local f cwd cost
+  for f in "$projects_dir"/*/*.jsonl; do
+    [ -f "$f" ] || continue
+    # Both greps legitimately return 1 (no match) for plenty of files —
+    # e.g. a session with no recorded cwd, or one that ended before any
+    # cost-state checkpoint was written — and pipefail would otherwise
+    # turn that into a script-ending failure via `set -e` on the
+    # assignment itself, before the `[ -n ... ] || continue` below even
+    # runs.
+    cwd="$(grep -m1 '"cwd":"' "$f" 2>/dev/null | jq -r '.cwd // empty' 2>/dev/null)" || true
+    [ -n "$cwd" ] || continue
+    [ -n "${wanted_paths[$cwd]:-}" ] || continue
+    cost="$(grep '"type":"cost-state"' "$f" 2>/dev/null | tail -1 | jq -r '.totalCostUSD // empty' 2>/dev/null)" || true
+    [ -n "$cost" ] || continue
+    usage_cost_map["$cwd"]="$(printf '%s\n%s\n' "${usage_cost_map[$cwd]:-0}" "$cost" | jq -s 'add')"
+  done
+
+  save_usage_cost_cache
+}
+
+usage_cost_for() {
+  local path="$1" cost f agent_cost agent_epoch now
+  f="$path/$AGENT_USAGE_FILENAME"
+  if [ -f "$f" ]; then
+    agent_cost="$(sed -n '1p' "$f" 2>/dev/null)"
+    agent_epoch="$(sed -n '2p' "$f" 2>/dev/null)"
+    now="$(date +%s)"
+    case "$agent_epoch" in
+      ''|*[!0-9]*) agent_epoch="" ;;
+    esac
+    if [ -n "$agent_cost" ] && [ -n "$agent_epoch" ] && [ $((now - agent_epoch)) -lt "$AGENT_USAGE_STALE_SECS" ]; then
+      LC_NUMERIC=C printf '$%.2f' "$agent_cost" 2>/dev/null && return 0
+    fi
+  fi
+
+  cost="${usage_cost_map["$path"]:-}"
+  if [ -z "$cost" ]; then
+    [ "$usage_cost_ever_fetched" = "1" ] && printf '%s' '-' || printf '%s' '?'
+    return 0
+  fi
+  # LC_NUMERIC=C: bash's printf %f is locale-sensitive and jq always
+  # emits a '.' decimal point — under a locale that expects ',' (e.g.
+  # fi_FI.UTF-8), plain `printf %.2f` on a '.'-separated value fails
+  # ("invalid number") and, under this script's `set -e`, would abort
+  # the whole picker.
+  LC_NUMERIC=C printf '$%.2f' "$cost"
+}
+
+# "*" for the row matching current_worktree_path (see its definition
+# above — the main worktree by default, or the last one you switched to),
+# " " for every other row.
+marker_for() {
+  [ "$1" = "$current_worktree_path" ] && printf '*' || printf ' '
+}
+
+# Persists current_worktree_path across separate runs of `wt` — without
+# this, a brand-new process always defaults back to the main worktree
+# (see the "must be run from the main worktree" check above), forgetting
+# whatever you'd last switched to in a previous run. Cached under the
+# repo's common git dir, like the PR/usage caches.
+current_worktree_cache_file() {
+  local common_dir
+  common_dir="$(cd "$repo_root" && git rev-parse --git-common-dir 2>/dev/null)" || return 1
+  case "$common_dir" in
+    /*) ;;
+    *) common_dir="$repo_root/$common_dir" ;;
+  esac
+  printf '%s/wt-current-worktree' "$common_dir"
+}
+
+save_current_worktree() {
+  local cache_file
+  cache_file="$(current_worktree_cache_file)" || return 0
+  printf '%s\n' "$current_worktree_path" >"$cache_file"
+}
+
+# Overrides current_worktree_path with whatever was last persisted, as
+# long as that worktree still exists (falls back to the default — the
+# main worktree — if there's no cache yet, or the persisted worktree was
+# since removed, e.g. via `wt rm`).
+load_current_worktree() {
+  local cache_file persisted p
+  cache_file="$(current_worktree_cache_file)" || return 0
+  [ -f "$cache_file" ] || return 0
+  persisted="$(head -n1 "$cache_file")"
+  [ -n "$persisted" ] || return 0
+  for p in "${paths[@]}"; do
+    if [ "$p" = "$persisted" ]; then
+      current_worktree_path="$persisted"
+      return 0
+    fi
+  done
+}
+
+MARKER_COL_WIDTH=1
+BRANCH_COL_WIDTH=56
+TMUX_COL_WIDTH=8
+CLAUDE_COL_WIDTH=8
+PR_COL_WIDTH=10
+USAGE_COL_WIDTH=9
+
+# Pad to a fixed width, truncating with "..." instead of just letting a
+# long value overflow and push every later column to the right.
+truncate_pad() {
+  local s="$1" width="$2"
+  if [ "${#s}" -gt "$width" ]; then
+    printf '%s' "${s:0:$((width - 3))}..."
+  else
+    printf '%-*s' "$width" "$s"
+  fi
+}
+
+# One line per worktree: idx<TAB>current-marker<TAB>state-status<TAB>
+# claude-status<TAB>pr-status<TAB>usage-cost<TAB>branch<TAB>path<TAB>
+# session<TAB>raw-branch<TAB>image-info<TAB>ports-info. Only
+# marker/state/claude/pr/usage/branch are shown in the picker; the rest
+# are available to its preview window and ctrl-x/ctrl-d bindings via
+# fzf's {n} placeholders regardless of what --with-nth displays. Shared
+# by `wt list`, the interactive picker, and the picker's own reload (so
+# a session killed via ctrl-x is reflected immediately).
+#
+# The state column (and header, see fzf_header_line) doubles as tmux
+# activity in normal mode and container state in container mode — a
+# session can only be "active" via `docker exec` into a running
+# container anyway, so container state is the more informative of the
+# two once containers are involved, and it's what ctrl-x's `docker stop`
+# there actually changes.
+fzf_line_for() {
+  local i="$1" session active claude pr usage state image_info ports_info id_info
+  session="$(session_name_for "${branches[$i]}" "${paths[$i]}")"
+  if tmux_has_session "$CONTAINER_MODE" "$session"; then
+    active="active"
+    claude="$(claude_status_for "${paths[$i]}")"
+  else
+    active="-"
+    claude="-"
+  fi
+  pr="$(pr_status_for "${branches[$i]}")"
+  usage="$(usage_cost_for "${paths[$i]}")"
+  if [ "$CONTAINER_MODE" = "1" ]; then
+    state="$(container_state_for "$session")"
+    image_info="$(container_image_info_for)"
+    ports_info="$(container_ports_info_for "$session")"
+    id_info="$(container_id_for "$session")"
+  else
+    state="$active"
+    image_info="-"
+    ports_info="-"
+    id_info="-"
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$i" \
+    "$(marker_for "${paths[$i]}")" \
+    "$(truncate_pad "$state" "$TMUX_COL_WIDTH")" \
+    "$(truncate_pad "$claude" "$CLAUDE_COL_WIDTH")" \
+    "$(truncate_pad "$pr" "$PR_COL_WIDTH")" \
+    "$(truncate_pad "$usage" "$USAGE_COL_WIDTH")" \
+    "$(truncate_pad "${branches[$i]}" "$BRANCH_COL_WIDTH")" \
+    "${paths[$i]}" "$session" "${branches[$i]}" "$image_info" "$ports_info" "$id_info"
+}
+
+# The picker's own pinned column-header row (used with --header-lines=1),
+# in the same tab-delimited shape as fzf_line_for's output so --with-nth
+# picks it apart the same way. The state column's label follows
+# CONTAINER_MODE the same way its value does (see fzf_line_for).
+fzf_header_line() {
+  local state_label="TMUX"
+  [ "$CONTAINER_MODE" = "1" ] && state_label="DOCKER"
+  printf '\t%-*s\t%-*s\t%-*s\t%-*s\t%-*s\t%-*s\t\t\t\t\t\t\n' \
+    "$MARKER_COL_WIDTH" "" \
+    "$TMUX_COL_WIDTH" "$state_label" "$CLAUDE_COL_WIDTH" "CLAUDE" "$PR_COL_WIDTH" "PR" \
+    "$USAGE_COL_WIDTH" "USAGE" "$BRANCH_COL_WIDTH" "BRANCH"
+}
+
+# Deletes one worktree and everything wt itself created for it: kills its
+# tmux session (if any), removes the worktree via `git worktree remove`
+# (falling back to --force, with confirmation, if git refuses because of
+# uncommitted/untracked changes), optionally deletes the local branch, and
+# drops any cached PR status for that branch. Interactive — always
+# confirms before doing anything destructive, since removing a worktree
+# can discard uncommitted work. Refuses to touch the main worktree (git
+# can't remove that one anyway; it's not a "worktree" you'd delete).
+delete_worktree() {
+  local path="$1" branch="$2" session="$3" confirm
+
+  if [ "$path" = "$main_worktree_path" ]; then
+    echo "wt: refusing to delete the main worktree ($path)" >&2
+    return 1
+  fi
+
+  echo "About to delete worktree:"
+  echo "  branch: $branch"
+  echo "  path:   $path"
+  if tmux_has_session "$CONTAINER_MODE" "$session"; then
+    echo "  tmux:   session '$session' is active and will be killed"
+  fi
+  read -r -p "Delete this worktree? [y/N] " confirm
+  case "$confirm" in
+    y|Y|yes|YES) ;;
+    *) echo "wt: aborted, nothing deleted"; return 1 ;;
+  esac
+
+  tmux kill-session -t "$session" 2>/dev/null || true
+
+  if [ "$CONTAINER_MODE" = "1" ]; then
+    docker rm -f "$session" 2>/dev/null || true
+    release_ports_for "$session"
+  fi
+
+  local rm_err
+  rm_err="$(mktemp -t wt-rm-err)"
+  if ! git -C "$repo_root" worktree remove "$path" 2>"$rm_err"; then
+    echo "wt: git worktree remove failed:" >&2
+    sed 's/^/  /' "$rm_err" >&2
+    rm -f "$rm_err"
+    read -r -p "Force removal? This discards any uncommitted/untracked changes in that worktree. [y/N] " confirm
+    case "$confirm" in
+      y|Y|yes|YES)
+        if ! git -C "$repo_root" worktree remove --force "$path"; then
+          echo "wt: git worktree remove --force also failed; nothing further attempted" >&2
+          return 1
+        fi
+        ;;
+      *)
+        echo "wt: not removed"
+        return 1
+        ;;
+    esac
+  else
+    rm -f "$rm_err"
+  fi
+
+  case "$branch" in
+    '('*')') ;;  # detached worktree placeholder like "(detached@abcd1234)" — no real branch to offer deleting
+    *)
+      read -r -p "Also delete local branch '$branch'? [y/N] " confirm
+      case "$confirm" in
+        y|Y|yes|YES)
+          git -C "$repo_root" branch -D "$branch" 2>&1 | sed 's/^/wt: /' || true
+          ;;
+      esac
+      ;;
+  esac
+
+  # Best-effort: drop this branch's cached PR status so a later reload
+  # doesn't keep showing stale data for a branch that no longer exists.
+  local cache_file tmp_cache
+  cache_file="$(pr_status_cache_file)" && [ -f "$cache_file" ] && {
+    tmp_cache="$(mktemp -t wt-pr-cache)"
+    grep -v "^${branch}	" "$cache_file" >"$tmp_cache" 2>/dev/null || true
+    mv "$tmp_cache" "$cache_file"
+  }
+
+  echo "wt: deleted worktree for '$branch'"
+}
+
+# Creates a worktree for $1 (an existing or brand-new branch), optionally
+# from start-point $2 (only used for a brand-new branch; default HEAD).
+# Sets $created_worktree_path and returns 0 on success; prints an error
+# and returns 1 otherwise. Shared by the 'new' command and the picker's
+# Ctrl-N prompt (__new_prompt below).
+create_worktree_for_branch() {
+  local branch_arg="$1" start_point="${2:-}"
+  local new_worktree_root new_path
+
+  for i in "${!paths[@]}"; do
+    if [ "${branches[$i]}" = "$branch_arg" ]; then
+      echo "wt: worktree for branch '$branch_arg' already exists at ${paths[$i]} (see 'wt list')" >&2
+      return 1
+    fi
+  done
+
+  # Sibling of the main worktree, never nested inside it — a worktree
+  # nested under the main tree risks tools/scanners that walk the main
+  # tree (build steps, editors, `find`) picking up its contents too.
+  new_worktree_root="$(dirname "$main_worktree_path")/${repo_name}.worktrees"
+  # Flattened, not `$new_worktree_root/$branch_arg` verbatim: a worktree
+  # path is independent of the branch's own ref name (git is fine with a
+  # "feat/x" branch checked out at any directory), so a slash in the
+  # branch name would otherwise nest it (.worktrees/feat/x) — leaving an
+  # empty "feat/" behind once that worktree is later removed (nothing
+  # here cleans up now-empty parent dirs), and making a shell prompt
+  # that shows both "current dir" and "current branch" redundantly print
+  # something like "x on feat/x" instead of "feat-x on feat/x".
+  new_path="$new_worktree_root/$(printf '%s' "$branch_arg" | tr '/' '-')"
+  if [ -e "$new_path" ]; then
+    echo "wt: refusing to create worktree: $new_path already exists" >&2
+    return 1
+  fi
+  mkdir -p "$(dirname "$new_path")"
+
+  if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$branch_arg"; then
+    if [ -n "$start_point" ]; then
+      echo "wt: branch '$branch_arg' already exists; ignoring start-point '$start_point'" >&2
+    fi
+    if ! git -C "$repo_root" worktree add "$new_path" "$branch_arg"; then
+      return 1
+    fi
+  else
+    if ! git -C "$repo_root" worktree add -b "$branch_arg" "$new_path" "${start_point:-HEAD}"; then
+      return 1
+    fi
+  fi
+
+  echo "wt: created worktree for '$branch_arg' at $new_path"
+  created_worktree_path="$new_path"
+}
+
+# Computed once, not per-picker-iteration: container mode is opt-in per
+# repo, never per worktree, so this one flag governs every code path
+# below (main loop, iTerm2 attach, wt rm, the picker's TMUX column) for
+# the whole run. A repo with no `container on` directive gets
+# CONTAINER_MODE=0 and is byte-identical to today (see decision I).
+warn_unknown_directives
+CONTAINER_MODE=0
+container_mode_enabled && CONTAINER_MODE=1
+[ "$CONTAINER_MODE" = "1" ] && require_docker_if_container_mode
+
+load_current_worktree
+
+cmd="${1:-switch}"
+
+# Set by the 'new' case below when a fresh worktree should be activated
+# (tmux/container started, VS Code + iTerm2 opened) the moment the manager
+# loop starts, without waiting for it to be fzf-picked first.
+pending_activate_path=""
+pending_activate_branch=""
+
+case "$cmd" in
+  init)
+    # Resolves the wt-orchestrator checkout `bin/wt` was symlinked from
+    # (the README's own install step: `ln -s .../bin/wt ~/.local/bin/wt`)
+    # so the skill file below can be built from the real
+    # docs/new-repo-setup-guide.md sitting next to it, rather than a
+    # second copy baked into this script that could drift out of sync.
+    # Manual symlink-chain resolution, not `readlink -f` (missing on some
+    # macOS/BSD `readlink`s) — BASH_SOURCE[0], not $0, since $0 is just
+    # whatever name this script was invoked as (e.g. `wt`, if found via
+    # PATH), while BASH_SOURCE[0] is this file's own path regardless.
+    wt_src="${BASH_SOURCE[0]}"
+    while [ -L "$wt_src" ]; do
+      wt_src_dir="$(cd -P "$(dirname "$wt_src")" && pwd)"
+      wt_src="$(readlink "$wt_src")"
+      case "$wt_src" in
+        /*) ;;
+        *) wt_src="$wt_src_dir/$wt_src" ;;
+      esac
+    done
+    wt_orchestrator_root="$(dirname "$(cd -P "$(dirname "$wt_src")" && pwd)")"
+    guide_src="$wt_orchestrator_root/docs/new-repo-setup-guide.md"
+    if [ ! -f "$guide_src" ]; then
+      echo "wt: init: can't find $guide_src" >&2
+      echo "wt: init: is 'wt' still a symlink into a wt-orchestrator checkout? (see README.md 'Install')" >&2
+      exit 1
+    fi
+
+    skill_dir="$repo_root/.claude/skills/wt-setup-repo"
+    mkdir -p "$skill_dir"
+    {
+      printf '%s\n' '---'
+      printf '%s\n' 'name: wt-setup-repo'
+      printf '%s\n' "description: 'Set up wt (wt-orchestrator) for this repo: write .wt-orchestrator.conf and a container-mode Dockerfile, with the Claude Code busy/waiting/idle status hook baked into the image itself, never into host Claude Code config. Trigger phrases: set up wt, wt init, configure wt for this repo, wt-setup-repo.'"
+      printf '%s\n' '---'
+      printf '\n'
+      cat "$guide_src"
+    } >"$skill_dir/SKILL.md"
+
+    echo "wt: wrote $skill_dir/SKILL.md"
+    echo "wt: commit it, then ask Claude Code (in a normal host session, in this repo) to run the wt-setup-repo skill"
+    exit 0
+    ;;
+  list)
+    fetch_pr_statuses
+    fetch_usage_costs
+    printf "%-3s %-30s %-10s %-8s %-10s %-9s %-45s %s\n" "CUR" "BRANCH" "ACTIVE" "CLAUDE" "PR" "USAGE" "SESSION" "PATH"
+    for i in "${!paths[@]}"; do
+      session_name="$(session_name_for "${branches[$i]}" "${paths[$i]}")"
+      if tmux_has_session "$CONTAINER_MODE" "$session_name"; then
+        active="yes"
+        claude="$(claude_status_for "${paths[$i]}")"
+      else
+        active="no"
+        claude="-"
+      fi
+      pr="$(pr_status_for "${branches[$i]}")"
+      usage="$(usage_cost_for "${paths[$i]}")"
+      cur="$(marker_for "${paths[$i]}")"
+      printf "%-3s %-30s %-10s %-8s %-10s %-9s %-45s %s\n" "$cur" "${branches[$i]}" "$active" "$claude" "$pr" "$usage" "$session_name" "${paths[$i]}"
+    done
+    exit 0
+    ;;
+  ports)
+    printf "%-30s %-8s %-8s %-40s %s\n" "BRANCH" "CPORT" "HPORT" "SESSION" "PATH"
+    ports_file="$(ports_cache_file 2>/dev/null || true)"
+    if [ -n "$ports_file" ] && [ -f "$ports_file" ]; then
+      while IFS=$'\t' read -r row_session row_cport row_hport; do
+        [ -n "$row_session" ] || continue
+        for i in "${!paths[@]}"; do
+          session_name="$(session_name_for "${branches[$i]}" "${paths[$i]}")"
+          if [ "$session_name" = "$row_session" ]; then
+            printf "%-30s %-8s %-8s %-40s %s\n" "${branches[$i]}" "$row_cport" "$row_hport" "$row_session" "${paths[$i]}"
+          fi
+        done
+      done <"$ports_file"
+    fi
+    exit 0
+    ;;
+  switch)
+    ;;
+  new)
+    branch_arg="${2:-}"
+    start_point="${3:-}"
+    if [ -z "$branch_arg" ]; then
+      echo "wt: usage: wt new <branch> [start-point]" >&2
+      exit 1
+    fi
+    created_worktree_path=""
+    create_worktree_for_branch "$branch_arg" "$start_point" || exit 1
+    pending_activate_path="$created_worktree_path"
+    pending_activate_branch="$branch_arg"
+    ;;
+  rm)
+    branch_arg="${2:-}"
+    if [ -z "$branch_arg" ]; then
+      echo "wt: usage: wt rm <branch>" >&2
+      exit 1
+    fi
+    found=-1
+    for i in "${!paths[@]}"; do
+      if [ "${branches[$i]}" = "$branch_arg" ]; then
+        found=$i
+        break
+      fi
+    done
+    if [ "$found" -lt 0 ]; then
+      echo "wt: no worktree found for branch '$branch_arg' (see 'wt list')" >&2
+      exit 1
+    fi
+    session_name="$(session_name_for "${branches[$found]}" "${paths[$found]}")"
+    delete_worktree "${paths[$found]}" "${branches[$found]}" "$session_name"
+    exit $?
+    ;;
+  details)
+    # Accepts either the branch name or the tmux/container session name
+    # (the latter being what the picker's preview panel and `wt list`'s
+    # SESSION column actually show) — whichever the caller has handy.
+    session_arg="${2:-}"
+    if [ -z "$session_arg" ]; then
+      echo "wt: usage: wt details <branch-or-session>" >&2
+      exit 1
+    fi
+    found=-1
+    for i in "${!paths[@]}"; do
+      session_name="$(session_name_for "${branches[$i]}" "${paths[$i]}")"
+      if [ "${branches[$i]}" = "$session_arg" ] || [ "$session_name" = "$session_arg" ]; then
+        found=$i
+        break
+      fi
+    done
+    if [ "$found" -lt 0 ]; then
+      echo "wt: no worktree found for branch or session '$session_arg' (see 'wt list')" >&2
+      exit 1
+    fi
+    session_name="$(session_name_for "${branches[$found]}" "${paths[$found]}")"
+    fetch_pr_statuses
+    fetch_usage_costs
+    if tmux_has_session "$CONTAINER_MODE" "$session_name"; then
+      active="yes"
+      claude="$(claude_status_for "${paths[$found]}")"
+    else
+      active="no"
+      claude="-"
+    fi
+    cur="no"
+    [ "${paths[$found]}" = "$current_worktree_path" ] && cur="yes"
+    printf 'Branch:  %s\n' "${branches[$found]}"
+    printf 'Current: %s\n' "$cur"
+    printf 'Path:    %s\n' "${paths[$found]}"
+    printf 'Session: %s\n' "$session_name"
+    printf 'Active:  %s\n' "$active"
+    printf 'CLAUDE:  %s\n' "$claude"
+    printf 'PR:      %s\n' "$(pr_status_for "${branches[$found]}")"
+    printf 'USAGE:   %s\n' "$(usage_cost_for "${paths[$found]}")"
+    if [ "$CONTAINER_MODE" = "1" ]; then
+      printf 'Docker:  %s\n' "$(container_state_for "$session_name")"
+      printf 'Cont.ID: %s\n' "$(container_id_for "$session_name")"
+      printf 'Image:   %s\n' "$(container_image_info_for)"
+      printf 'Ports:   %s\n' "$(container_ports_info_for "$session_name")"
+    fi
+    exit 0
+    ;;
+  __fzfgen)
+    # Hidden: invoked by the picker's own fzf `reload` binding (Ctrl-R,
+    # Ctrl-X, Ctrl-D), not a user-facing command. Loads the PR/usage
+    # *caches* only — never fetches from `gh` or scans ~/.claude/projects
+    # — so this stays fast; Ctrl-F (__fzfgen_fetch, below) is the only
+    # thing that does the slow fetch. Must emit the header line first,
+    # matching the initial fzf_input the picker seeds itself with (see
+    # below) — the picker uses --header-lines=1, so a reload without it
+    # would make the first real row disappear into the header slot.
+    load_pr_status_cache
+    load_usage_cost_cache
+    fzf_header_line
+    for i in "${!paths[@]}"; do
+      fzf_line_for "$i"
+    done
+    exit 0
+    ;;
+  __fzfgen_fetch)
+    # Hidden: invoked only by the picker's Ctrl-F binding. Refreshes both
+    # of the slow, "go get new info" columns in one go — GitHub PR status
+    # (one or more network round-trips) and Claude Code usage cost
+    # (a scan of every session transcript on the machine) — rather than
+    # having a separate refresh key per slow column.
+    fetch_pr_statuses
+    fetch_usage_costs
+    fzf_header_line
+    for i in "${!paths[@]}"; do
+      fzf_line_for "$i"
+    done
+    exit 0
+    ;;
+  __delete_by_fields)
+    # Hidden: invoked only by the picker's Ctrl-D binding, with the
+    # highlighted row's path/raw-branch/session passed as args. fzf's
+    # `execute` (as opposed to `execute-silent`) suspends the picker and
+    # hands the terminal back for this, so delete_worktree's interactive
+    # confirmation prompts work normally.
+    delete_worktree "$2" "$3" "$4"
+    exit 0
+    ;;
+  __new_prompt)
+    # Hidden: invoked only by the picker's Ctrl-N binding. Only *creates*
+    # the worktree here — it deliberately doesn't also activate it (no
+    # tmux/container start, no VS Code/iTerm2 window): this runs as a
+    # one-off subprocess via fzf's `execute`, and the iTerm2 window
+    # open/close lifecycle (active_iterm_window_id) lives only in the
+    # persistent manager loop's own memory, not on disk, so a subprocess
+    # opening/closing a window here would leave the parent loop's tracked
+    # id stale. Instead this just creates the branch/worktree and reloads
+    # the list; the reload surfaces the new row, and picking it with Enter
+    # (the normal switch path, already running in the parent loop) is what
+    # actually opens tmux/VS Code/iTerm2 for it.
+    read -r -p "New branch name: " branch_name
+    if [ -z "$branch_name" ]; then
+      echo "wt: aborted, no branch name given"
+    else
+      created_worktree_path=""
+      create_worktree_for_branch "$branch_name" ""
+    fi
+    exit 0
+    ;;
+  *)
+    echo "wt: unknown command '$cmd' (expected 'switch', 'new', 'list', 'rm', or 'ports')" >&2
+    exit 1
+    ;;
+esac
+
+# Tracks the iTerm2 window opened for the currently-active worktree, so
+# switching worktrees replaces it instead of piling up one window per
+# switch. Empty until the first successful switch.
+active_iterm_window_id=""
+
+# Debug log for the iTerm2 window open/close lifecycle — every id wt
+# thinks is active, every close it attempts, every window it opens, and
+# whether each of those actually did what wt expected. Exists because
+# "the previous worktree's terminal window doesn't get closed" reports
+# are otherwise very hard to diagnose after the fact: by the time you
+# notice a leftover window, wt's own in-memory state (what it *thought*
+# it had just closed/opened) is long gone. Appended to, never rotated or
+# cleared automatically — see README "Troubleshooting: leftover iTerm2
+# windows" for how to read/clear it.
+iterm_log_file() {
+  local common_dir
+  common_dir="$(cd "$repo_root" && git rev-parse --git-common-dir 2>/dev/null)" || return 1
+  case "$common_dir" in
+    /*) ;;
+    *) common_dir="$repo_root/$common_dir" ;;
+  esac
+  printf '%s/wt-iterm.log' "$common_dir"
+}
+
+log_iterm() {
+  local f
+  f="$(iterm_log_file)" || return 0
+  printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >>"$f" 2>/dev/null || true
+}
+
+# All the currently open iTerm2 window ids, space-separated. Used by
+# open_iterm_window_for to detect a new window even when the AppleEvent
+# that requested it doesn't report back cleanly (see below).
+iterm_window_ids() {
+  osascript -e 'tell application "iTerm2" to id of every window' 2>/dev/null | tr -d ','
+}
+
+# Where the id of the currently-tracked iTerm2 window is persisted, so a
+# restarted manager can still close the window its predecessor opened.
+# Without this the id lived only in active_iterm_window_id above, and
+# restarting `wt` (to pick up an update, say) orphaned whatever window
+# was open: the fresh process started with no id, skipped the close on
+# the next switch, and left two worktree windows on screen.
+iterm_window_state_file() {
+  local common_dir
+  common_dir="$(cd "$repo_root" && git rev-parse --git-common-dir 2>/dev/null)" || return 1
+  case "$common_dir" in
+    /*) ;;
+    *) common_dir="$repo_root/$common_dir" ;;
+  esac
+  printf '%s/wt-iterm-window' "$common_dir"
+}
+
+# iTerm2's current pid, or empty if it isn't running. Recorded alongside
+# the window id because iTerm2 numbers windows from a counter that
+# restarts with the app: an id persisted under a previous iTerm2 run can
+# name a completely unrelated window in the current one, and closing that
+# would throw away real work. A pid mismatch therefore means "different
+# iTerm2, this id is meaningless" — see load_active_iterm_window_id.
+iterm_pid() {
+  pgrep -x iTerm2 2>/dev/null | head -n 1
+}
+
+save_active_iterm_window_id() {
+  local f
+  f="$(iterm_window_state_file)" || return 0
+  if [ -n "$active_iterm_window_id" ]; then
+    printf '%s\t%s\n' "$(iterm_pid)" "$active_iterm_window_id" >"$f" 2>/dev/null || true
+  else
+    rm -f "$f" 2>/dev/null || true
+  fi
+}
+
+# Adopt the window the previous manager process was tracking, so a
+# restart of `wt` doesn't orphan it. Only when it is still open and still
+# belongs to the same iTerm2 run; anything else and we forget it, which
+# is the safe direction to be wrong in (a stray window the user closes by
+# hand, rather than one wt closes out from under them).
+load_active_iterm_window_id() {
+  local f saved_pid saved_id now_pid
+  active_iterm_window_id=""
+  f="$(iterm_window_state_file)" || return 0
+  [ -f "$f" ] || return 0
+  IFS=$'\t' read -r saved_pid saved_id <"$f" || return 0
+  [ -n "$saved_id" ] || return 0
+  now_pid="$(iterm_pid)"
+  if [ -z "$now_pid" ]; then
+    log_iterm "not adopting persisted window id=${saved_id}: iTerm2 is not running"
+    rm -f "$f" 2>/dev/null || true
+    return 0
+  fi
+  if [ "$saved_pid" != "$now_pid" ]; then
+    log_iterm "not adopting persisted window id=${saved_id}: recorded under iTerm2 pid ${saved_pid:-<none>}, now ${now_pid} — window ids are reused across restarts"
+    rm -f "$f" 2>/dev/null || true
+    return 0
+  fi
+  case " $(iterm_window_ids) " in
+    *" ${saved_id} "*)
+      active_iterm_window_id="$saved_id"
+      log_iterm "adopted persisted window id=${saved_id} left by a previous manager process"
+      ;;
+    *)
+      log_iterm "not adopting persisted window id=${saved_id}: no such window is open any more"
+      rm -f "$f" 2>/dev/null || true
+      ;;
+  esac
+}
+
+# Open a new iTerm2 window attached to the given tmux session, closing the
+# previously-opened one first (if any), without touching this process or
+# its terminal — this script is the persistent manager and must never be
+# attached/exec'd into a worktree session itself.
+#
+# The command runs from a generated script file (rather than an inline
+# AppleScript string) to sidestep nested-quoting hell, and it pauses on a
+# non-zero exit so an attach failure is readable: many iTerm2 setups have
+# "Close Sessions On End" enabled, which closes the window the instant the
+# command exits — a fast failure would otherwise flash and vanish unread.
+open_iterm_window_for() {
+  local session="$1" use_container="${2:-0}" branch="${3:-}"
+  local script_path new_window_id before_ids after_ids id
+  local close_out close_ec still_open create_raw
+  local attach_cmd session_check_cmd window_title
+
+  # Bare `tmux`, not $tmux_bin, in container mode — the container's
+  # tmux is whatever the project's Dockerfile installs, not necessarily
+  # at the host's resolved path. `docker` itself, though, runs on the
+  # host (to exec into the container), so it needs the same resolved-path
+  # treatment as $tmux_bin below — this whole command runs inside a fresh
+  # iTerm2-spawned process that won't see the manager's PATH.
+  #
+  # session_check_cmd mirrors tmux_has_session's own container/host
+  # distinction, and is what tells a genuine attach failure apart from
+  # the session/container simply having been torn down out from under
+  # this window (ctrl-x, ctrl-d/delete, `wt rm`, or the session's last
+  # pane just exiting on its own) — see the generated script below.
+  if [ "$use_container" = "1" ]; then
+    attach_cmd="'$docker_bin' exec -it '$session' tmux attach -t '$session'"
+    session_check_cmd="'$docker_bin' exec '$session' tmux has-session -t '$session'"
+    window_title="${repo_name}/${branch} (container)"
+  else
+    attach_cmd="'$tmux_bin' attach -t '$session'"
+    session_check_cmd="'$tmux_bin' has-session -t '$session'"
+    window_title="${repo_name}/${branch}"
+  fi
+
+  log_iterm "open_iterm_window_for: session=${session} active_iterm_window_id(before)=${active_iterm_window_id:-<none>}"
+
+  if [ -n "$active_iterm_window_id" ]; then
+    log_iterm "closing previous window id=${active_iterm_window_id}"
+    # Best-effort: the user may have already closed it by hand.
+    close_out="$(osascript -e "tell application \"iTerm2\" to close (windows whose id is ${active_iterm_window_id})" 2>&1)"
+    close_ec=$?
+    # iTerm2's `close` returns before the window has actually gone, so
+    # looking once straight afterwards reported "still open" on virtually
+    # every successful switch — the warning below fired constantly and
+    # meant nothing. Give the window up to ~2s to disappear first.
+    still_open="yes"
+    for _ in $(seq 1 20); do
+      case " $(iterm_window_ids) " in
+        *" ${active_iterm_window_id} "*) ;;
+        *) still_open="no"; break ;;
+      esac
+      sleep 0.1
+    done
+    log_iterm "close attempt: id=${active_iterm_window_id} exit=${close_ec} output=${close_out:-<empty>} still_open_after_wait=${still_open}"
+    if [ "$still_open" = "yes" ]; then
+      echo "wt: warning: iTerm2 window ${active_iterm_window_id} did not close — see $(iterm_log_file 2>/dev/null || echo '<log file>')" >&2
+    fi
+    active_iterm_window_id=""
+    save_active_iterm_window_id
+  fi
+
+  script_path="$(mktemp -t wt-attach)"
+  cat >"$script_path" <<SCRIPT
+#!/bin/bash
+# iTerm2 otherwise titles the window after the foreground job (e.g.
+# "docker" or "tmux") — this OSC sets a fixed title instead, and (unlike
+# an AppleScript-side \`set name of session\`) it survives exec'ing into
+# the attach command below since it's the window's own emitted title.
+printf '\033]0;%s\007' "$window_title"
+$attach_cmd
+ec=\$?
+if [ "\$ec" -ne 0 ] && $session_check_cmd >/dev/null 2>&1; then
+  # The session/container is still there, so this wasn't just it being
+  # torn down (ctrl-x, ctrl-d/delete, \`wt rm\`, or its last pane exiting
+  # on its own) — a real attach failure, worth pausing to read.
+  echo
+  echo "[wt] tmux attach exited with code \$ec"
+  echo "[wt] press Enter to close this window"
+  read -r
+fi
+rm -f "$script_path"
+SCRIPT
+  chmod +x "$script_path"
+
+  before_ids=" $(iterm_window_ids) "
+  log_iterm "window ids before create: ${before_ids}"
+
+  create_raw="$(osascript 2>&1 <<EOF
+tell application "iTerm2"
+  activate
+  set newWindow to (create window with default profile command "${script_path}")
+  return id of newWindow
+end tell
+EOF
+  )"
+  log_iterm "create window raw output: ${create_raw:-<empty>}"
+
+  # A clean success is a bare numeric id; anything else (empty, or an
+  # AppleScript error message — e.g. a timeout, observed in practice even
+  # though iTerm2 goes ahead and creates the window a moment later
+  # anyway) is treated as "unknown", not as that garbage text becoming
+  # the tracked id.
+  case "$create_raw" in
+    ''|*[!0-9]*) new_window_id="" ;;
+    *) new_window_id="$create_raw" ;;
+  esac
+
+  # If we didn't get a clean id back, we'd otherwise never learn this
+  # window's id, meaning we could never close it on the *next* switch
+  # (the very leak this was reported for: previous worktrees' windows
+  # piling up instead of being replaced). Fall back to diffing the
+  # window-id list, giving iTerm a moment to actually finish creating it
+  # first.
+  if [ -z "$new_window_id" ]; then
+    log_iterm "create did not return a clean id; falling back to window-id diff"
+    sleep 1
+    after_ids=" $(iterm_window_ids) "
+    log_iterm "window ids after create (+1s sleep): ${after_ids}"
+    for id in $after_ids; do
+      case "$before_ids" in
+        *" $id "*) ;;
+        *) new_window_id="$id"; break ;;
+      esac
+    done
+    if [ -n "$new_window_id" ]; then
+      log_iterm "diff found new window id=${new_window_id}"
+    else
+      log_iterm "diff found no new window id"
+    fi
+  fi
+
+  if [ -n "$new_window_id" ]; then
+    active_iterm_window_id="$new_window_id"
+    save_active_iterm_window_id
+    log_iterm "tracking window id=${new_window_id} for session=${session}"
+  else
+    log_iterm "FAILED to open/track a window for session=${session}"
+    echo "wt: failed to open an iTerm2 window (is iTerm2 installed, and is 'Allow all apps to control iTerm2 via AppleEvents' enabled in iTerm2 > Settings > General > Magic?)" >&2
+  fi
+}
+
+# Everything a pick (or a freshly created worktree, see 'new' above) needs
+# to become "the active worktree": env-file copy-in, tmux/container session
+# start-or-reuse, VS Code, iTerm2 window, and persisting it as current for
+# next time. Shared by the manager loop below and the 'new' command so
+# `wt new <branch>` doesn't require also fzf-picking the branch it just
+# created.
+activate_worktree() {
+  local target_path="$1" session_name="$2" target_branch="$3"
+
+  sync_env_files "$target_path"
+
+  if [ "$CONTAINER_MODE" = "1" ]; then
+    container_start_if_needed "$session_name" "$target_path"
+    if docker exec "$session_name" tmux has-session -t "$session_name" 2>/dev/null; then
+      echo "wt: resuming existing session for ${target_branch}"
+    else
+      # No command is ever sent in here — whatever starts (an agent, a
+      # shell, nothing) is entirely up to the container image's own
+      # CMD/entrypoint or tmux default-command. See
+      # docs/container-sandbox-plan.md decision on agent-agnosticism.
+      docker exec -d "$session_name" tmux new-session -d -s "$session_name" -c "$target_path"
+    fi
+  else
+    if tmux has-session -t "$session_name" 2>/dev/null; then
+      echo "wt: resuming existing session for ${target_branch}"
+    else
+      tmux new-session -d -s "$session_name" -c "$target_path"
+      # No tmux session existed yet for this worktree, but Claude Code may
+      # still have a prior conversation on disk for this directory; --resume
+      # with no id opens its own picker (with an option to start fresh).
+      tmux send-keys -t "$session_name" 'claude --resume' C-m
+    fi
+  fi
+
+  # -r reuses the existing VS Code window instead of opening a new one
+  # per switch.
+  code -r "$target_path"
+  open_iterm_window_for "$session_name" "$CONTAINER_MODE" "$target_branch"
+
+  # So the next loop iteration's picker (and this iteration's own
+  # reloads, had there been any after this point) marks the worktree you
+  # just switched to as current, not wherever `wt` originally started —
+  # and persisted to disk so a future, separate run of `wt` remembers it
+  # too, rather than always defaulting back to the main worktree.
+  current_worktree_path="$target_path"
+  save_current_worktree
+  save_activation_time "$target_path"
+}
+
+# The manager loop: fzf-pick a worktree, spin up/attach its tmux session in
+# the background, pop an iTerm2 window for it, then loop back to the picker
+# so this terminal stays the persistent manager. Esc/Ctrl-C in fzf exits.
+self_q="$(printf '%q' "$0")"
+
+# Ctrl-X's in-place kill: in container mode this stops the container
+# outright (not just the tmux session inside it) — the container can be
+# `docker start`ed again on the next switch, same as any other stopped
+# container, and it's what the state column then reports as "stopped".
+# Outside container mode there's no container to stop, so it falls back
+# to killing the tmux session on the host tmux server, as before.
+ctrl_x_label="kill tmux"
+if [ "$CONTAINER_MODE" = "1" ]; then
+  ctrl_x_kill_cmd="${docker_bin} stop {9} 2>/dev/null"
+  ctrl_x_label="stop container"
+else
+  ctrl_x_kill_cmd="${tmux_bin} kill-session -t {9} 2>/dev/null"
+fi
+
+# The preview panel's own field labels/order follow CONTAINER_MODE too:
+# container mode appends the short container id (field 13) to the Docker
+# state line, and adds the image (built or not) and allocated host ports
+# (see container_id_for/container_image_info_for/container_ports_info_for
+# and their fields 13/11/12 from fzf_line_for) below it, since those are
+# exactly what ctrl-x/switching there actually change. No Session line:
+# the container name doesn't add anything the id and branch don't already
+# say.
+if [ "$CONTAINER_MODE" = "1" ]; then
+  fzf_preview_cmd='printf "Branch:  %s\nDocker:  %s (container %s)\nImage:   %s\nPorts:   %s\nCLAUDE:  %s\nPR:      %s\nUSAGE:   %s\nPath:    %s\n" {10} {3} {13} {11} {12} {4} {5} {6} {8}'
+  fzf_preview_lines=9
+else
+  fzf_preview_cmd='printf "Branch:  %s\nTMUX:    %s\nCLAUDE:  %s\nPR:      %s\nUSAGE:   %s\nPath:    %s\nSession: %s\n" {10} {3} {4} {5} {6} {8} {9}'
+  fzf_preview_lines=8
+fi
+
+echo "wt: logging iTerm2 window open/close activity to $(iterm_log_file 2>/dev/null || echo '<unavailable>')" >&2
+log_iterm "=== wt manager loop starting (pid $$) ==="
+load_active_iterm_window_id
+
+# `wt new <branch>` creates the worktree in the case block above (before
+# these functions existed yet), then defers to here to actually activate
+# it — same tmux/container/VS Code/iTerm2 sequence as fzf-picking it would
+# have triggered, minus needing the user to also go pick it.
+if [ -n "$pending_activate_path" ]; then
+  parse_worktrees
+  pending_session_name="$(session_name_for "$pending_activate_branch" "$pending_activate_path")"
+  activate_worktree "$pending_activate_path" "$pending_session_name" "$pending_activate_branch"
+fi
+
+while true; do
+  # Re-parse rather than trust arrays from a previous iteration: Ctrl-D in
+  # the picker below can delete a worktree mid-session, and the picker's
+  # own reloads (Ctrl-R/Ctrl-D/Ctrl-F) already always see current state
+  # since each is a fresh process — this keeps the outer loop in sync too.
+  parse_worktrees
+  load_pr_status_cache
+  load_usage_cost_cache
+  fzf_input="$(fzf_header_line)"$'\n'
+  for i in "${!paths[@]}"; do
+    fzf_input+="$(fzf_line_for "$i")"$'\n'
+  done
+
+  selection="$(printf '%s' "$fzf_input" | fzf \
+    --delimiter='\t' --with-nth=2,3,4,5,6,7 --prompt="worktree > " --layout=reverse \
+    --header-lines=1 \
+    --header="enter: switch · ctrl-n: new worktree · ctrl-x: ${ctrl_x_label} · ctrl-d: delete worktree · ctrl-r: refresh · ctrl-f: fetch PR/usage" \
+    --preview "$fzf_preview_cmd" \
+    --preview-window="bottom:${fzf_preview_lines}:wrap" \
+    --bind "ctrl-n:execute(bash ${self_q} __new_prompt)+reload(bash ${self_q} __fzfgen)" \
+    --bind "ctrl-x:execute-silent(${ctrl_x_kill_cmd})+reload(bash ${self_q} __fzfgen)" \
+    --bind "ctrl-d:execute(bash ${self_q} __delete_by_fields {8} {10} {9})+reload(bash ${self_q} __fzfgen)" \
+    --bind "ctrl-r:reload(bash ${self_q} __fzfgen)" \
+    --bind "ctrl-f:reload(bash ${self_q} __fzfgen_fetch)")"
+
+  if [ -z "$selection" ]; then
+    break
+  fi
+
+  # Read straight off the selected row's own fields (path, session,
+  # raw-branch) rather than looking `idx` up in the paths/branches arrays:
+  # the row came from this iteration's parse_worktrees, so it's already
+  # authoritative, and Ctrl-D deleting a worktree mid-picker-session means
+  # an index-based lookup could otherwise point at a since-removed entry.
+  selected_path="$(printf '%s' "$selection" | cut -f8)"
+  session_name="$(printf '%s' "$selection" | cut -f9)"
+  selected_branch="$(printf '%s' "$selection" | cut -f10)"
+
+  log_iterm "switch selected: branch=${selected_branch} path=${selected_path} session=${session_name}"
+
+  activate_worktree "$selected_path" "$session_name" "$selected_branch"
+done
