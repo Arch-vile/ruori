@@ -1,0 +1,63 @@
+# Config file (`.ruori.conf`) and env files
+
+## Env files
+
+`git worktree add` only checks out tracked files, so a new worktree
+starts with none of your gitignored, machine-local env files (`.env`,
+`.env.local`, etc.) — just any tracked template (`.env.example`) if the
+repo has one. On every switch, `ruori` copies each file matching a
+configured pattern (below) found in the **main worktree** (the repo
+root — not necessarily the one you're switching *from*) into the
+target worktree, but only ones that don't already exist there. It
+never overwrites a file already present, so once a worktree has its
+own copy you can freely diverge it (e.g. a different port) without
+`ruori` stomping on it on a later switch.
+
+Dynamic port allocation (so worktrees don't collide on the same port)
+is handled by container mode's `container-port` directive, a separate
+mechanism from env-file copying — see the
+[container sandbox guide](container-sandbox-guide.md).
+
+## Config file
+
+`ruori` looks for `.ruori.conf` at the main worktree's root. It's
+created by you, not `ruori` — if it doesn't exist, `ruori` falls back to
+copying just `.env`/`.env.*` (the previous hardcoded behavior).
+
+Each line is `<directive> <value>`. Blank lines and lines starting with
+`#` are ignored; an unrecognized directive is warned about and skipped
+rather than breaking the file. This shape is deliberate: the same file
+will grow more kinds of setting later (editor override, port range
+base — see TODO.md) without needing a new format.
+
+The only directive outside container mode is `copy`, for which
+gitignored files get copied into a new worktree if it's missing them:
+the value is a glob pattern relative to the repo root. A plain filename
+matches exactly (an exact path, `config/local.json`, works too); shell
+wildcards (`*`, `?`, `[...]`) work as well, including partway through a
+path:
+
+```
+# .ruori.conf — files to copy into a new worktree if missing
+copy .env
+copy .env.*
+copy config/local.json
+copy secrets/*.local.yaml
+```
+
+You (or an AI coding agent) can generate this file for a given repo —
+see [agent-config-guide.md](agent-config-guide.md) for a self-contained
+set of instructions written for exactly that: point an agent at it, in
+whatever repo you want `ruori` set up in, and it'll inspect that repo's
+`.gitignore`/config and write a sensible `.ruori.conf`.
+
+Four more directives opt a repo into **container mode**: `container`,
+`container-file`, `container-port`, `container-copy`. See the
+[container sandbox guide](container-sandbox-guide.md) for what they do
+and a worked example — a repo with none of them behaves exactly as
+described above.
+
+The easiest way to get all of this (config file *and* Dockerfile *and*
+the Claude Code status hook baked into it) written for a repo in one
+shot is `ruori init` — see the
+[README's "Setting up ruori for a repo"](../README.md#setting-up-ruori-for-a-repo).
