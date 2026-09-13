@@ -137,6 +137,17 @@ container mode) Docker state/container id/image/ports.
 Dashboard of container-mode host-port allocations. See the
 [container sandbox guide](container-sandbox-guide.md).
 
+## `ruori resources`
+
+Everything `ruori` itself creates, reads, or manages, grouped into
+book-keeping files, configuration, and managed resources (Docker/tmux)
+— each section split into what's per-repo and what's global. Meant to
+make `ruori` transparent about its own file/resource usage rather than
+a magic box; a static description (paths and purpose), not a live
+exists/missing check. See [config-file.md](config-file.md) and the
+[container sandbox guide](container-sandbox-guide.md) for detail on
+the configuration-driven pieces it points at.
+
 ## `ruori init`
 
 One-time per repo: writes a Claude Code skill,
