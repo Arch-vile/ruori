@@ -1,3 +1,8 @@
+---
+name: ruori-setup-repo
+description: 'Set up ruori for this repo: write .ruori.conf and a container-mode Dockerfile, with the Claude Code busy/waiting/idle status hook baked into the image itself, never into host Claude Code config. Trigger phrases: set up ruori, ruori init, configure ruori for this repo, ruori-setup-repo.'
+---
+
 # Setting up `ruori` config for a new repo — instructions for an AI agent
 
 You are being asked to create the config `ruori` (a
