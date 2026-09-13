@@ -1,0 +1,25 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "ruori-claude-status-hook busy", "timeout": 5 }] }
+    ],
+    "PreToolUse": [
+      { "hooks": [{ "type": "command", "command": "ruori-claude-status-hook busy", "timeout": 5 }] }
+    ],
+    "PostToolUse": [
+      { "hooks": [{ "type": "command", "command": "ruori-claude-status-hook busy", "timeout": 5 }] }
+    ],
+    "PermissionRequest": [
+      { "hooks": [{ "type": "command", "command": "ruori-claude-status-hook waiting", "timeout": 5 }] }
+    ],
+    "Elicitation": [
+      { "hooks": [{ "type": "command", "command": "ruori-claude-status-hook waiting", "timeout": 5 }] }
+    ],
+    "ElicitationResult": [
+      { "hooks": [{ "type": "command", "command": "ruori-claude-status-hook busy", "timeout": 5 }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "ruori-claude-status-hook idle", "timeout": 5 }] }
+    ]
+  }
+}
