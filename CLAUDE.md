@@ -98,8 +98,8 @@ change:
    rather than each worktree getting its own.
 10. **Commands** (the big `case "$cmd" in` block) — user-facing:
     `switch` (default, the manager loop), `new`, `list`, `rm`, `ports`,
-    `details`, `init`. Hidden, invoked only by the picker's own fzf key
-    bindings as subprocesses: `__fzfgen`, `__fzfgen_fetch`,
+    `details`, `resources`, `init`. Hidden, invoked only by the picker's
+    own fzf key bindings as subprocesses: `__fzfgen`, `__fzfgen_fetch`,
     `__delete_by_fields`, `__new_prompt` — these exist because fzf's
     `reload`/`execute` bindings shell out to a fresh process that can't
     share this process's in-memory state, so each re-derives whatever it
@@ -123,3 +123,19 @@ change:
 - Destructive operations (`delete_worktree`, `git worktree remove
   --force`) always confirm interactively — there's no non-interactive
   override, by design.
+
+## Keeping `ruori resources` accurate
+
+`bin/ruori`'s `resources` command (documented in `docs/commands.md`)
+is meant to be the single, transparent listing of every file/resource
+`ruori` itself creates, reads, or manages — book-keeping cache files,
+`.ruori.conf`, generated files, and Docker/tmux resources — split into
+Global, Repository, and Worktree scope.
+
+Whenever a change to `bin/ruori` adds, removes, or renames a
+file/resource that `ruori` owns or depends on (a new cache file, a new
+config directive, a new generated file, a new managed Docker/tmux
+resource), update the `resources)` case branch in `bin/ruori` and the
+"`ruori resources`" section of `docs/commands.md` in the same change,
+so this listing never drifts out of sync with what the script
+actually does.

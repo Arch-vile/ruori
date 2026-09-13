@@ -1378,6 +1378,106 @@ case "$cmd" in
     fi
     exit 0
     ;;
+  resources)
+    # Worktree-scoped entries below describe ONE worktree at a time
+    # (default: whichever is "current" -- the * marker), the same
+    # selector convention as `details`: a repo can have any number of
+    # worktrees, so dumping every worktree's files in one go doesn't
+    # scale and isn't what you want anyway -- you're almost always
+    # asking "what does *this* worktree have", not "list them all".
+    session_arg="${2:-}"
+    found=-1
+    if [ -n "$session_arg" ]; then
+      for i in "${!paths[@]}"; do
+        session_name="$(session_name_for "${branches[$i]}" "${paths[$i]}")"
+        if [ "${branches[$i]}" = "$session_arg" ] || [ "$session_name" = "$session_arg" ]; then
+          found=$i
+          break
+        fi
+      done
+      if [ "$found" -lt 0 ]; then
+        echo "ruori: no worktree found for branch or session '$session_arg' (see 'ruori list')" >&2
+        exit 1
+      fi
+    else
+      for i in "${!paths[@]}"; do
+        if [ "${paths[$i]}" = "$current_worktree_path" ]; then
+          found=$i
+          break
+        fi
+      done
+      [ "$found" -ge 0 ] || found=0
+    fi
+    worktree_path="${paths[$found]}"
+    worktree_branch="${branches[$found]}"
+    worktree_session="$(session_name_for "$worktree_branch" "$worktree_path")"
+
+    # Prints one "<path-or-name>" line then one "<description>" line,
+    # both indented under a scope heading, with a blank separator line
+    # after -- so every filesystem-backed entry is a full absolute path
+    # a terminal can open directly, not a pattern the reader has to
+    # resolve themselves.
+    resources_section() {
+      printf '%s\n--------------------------------\n' "$1"
+    }
+    resources_scope() {
+      printf '\n    %s\n' "$1"
+    }
+    resources_entry() {
+      printf '        %s\n        %s\n\n' "$1" "$2"
+    }
+    resources_none() {
+      printf '        (none)\n\n'
+    }
+
+    common_dir="$(git_common_dir)" || common_dir="<unavailable>"
+    dockerfile_rel="$(container_file_path)"
+
+    printf 'Worktree: %s (%s)\n' "$worktree_branch" "$worktree_path"
+    printf "(see 'ruori list' for other worktrees; pass a branch or session name, e.g. 'ruori resources %s', to see a different one)\n" "$worktree_branch"
+
+    resources_section "Book-keeping"
+    resources_scope "Global"
+    resources_entry "$HOME/.claude/projects" "Not ruori's own file -- Claude Code's own session-transcript log, which Claude Code writes on its own with no setup. Nothing to manage yourself. ruori only reads it, to total up USAGE for a worktree whose Claude Code runs directly on the host (not in a container); it's updated continuously by Claude Code itself while a session runs there. For a worktree in container mode this path is irrelevant -- its own transcripts live inside the container instead; see .ruori-agent-usage under Worktree below."
+    resources_scope "Repository"
+    resources_entry "$common_dir/ruori-current-worktree" "Internal to ruori, no need to open it. Remembers which worktree you last switched to, so the picker's * marker survives across separate 'ruori' runs. Written by ruori itself on every switch; read once on startup."
+    resources_entry "$common_dir/ruori-activation-times" "Internal to ruori, safe to delete. One line per worktree with the epoch time it was last activated, used only to sort the picker/list so your most recently used worktree sorts first. Rewritten by ruori every time you switch to a worktree."
+    resources_entry "$common_dir/ruori-pr-status.cache" "Internal to ruori; delete it any time to force a re-fetch. Caches each branch's GitHub PR status so the picker doesn't call 'gh' on every reload. Written only by a Ctrl-F fetch in the picker, or by 'ruori list'/'ruori details' (which always fetch fresh); read on every other picker reload."
+    resources_entry "$common_dir/ruori-usage-cost.cache" "Internal to ruori; delete it any time to force a re-fetch. Caches each worktree's total Claude Code spend (sourced from ~/.claude/projects or .ruori-agent-usage -- see both above/below) so the picker doesn't rescan your whole Claude Code history on every reload. Written by the same Ctrl-F / 'list' / 'details' fetches as the PR cache above."
+    resources_entry "$common_dir/ruori-ports" "Internal to ruori; only matters in container mode. A worktree's host port is only seeded by a hash of it -- ruori then scans forward from that seed for the first port that's actually free, so the final pick depends on ambient state (what else is running) at that moment, not the hash alone. Docker bakes that exact port into the container permanently at creation and won't let it change without recreating the container, so ruori has to remember what it picked here rather than recomputing it later and risking a different answer. Written when a container-mode worktree's container first starts; its entries are dropped when that worktree is removed ('ruori rm')."
+    resources_entry "$common_dir/ruori-iterm.log" "Debug-only -- you don't need to read this unless an iTerm2 window is misbehaving (see docs/troubleshooting.md). An append-only log of the manager loop's own iTerm2 window open/close lifecycle. Written continuously by ruori for as long as the manager loop ('ruori' with no args) keeps running."
+    resources_entry "$common_dir/ruori-iterm-window" "Internal to ruori. Tracks the single iTerm2 window id the manager loop currently owns, so switching worktrees closes the right window before opening a new one instead of leaking windows behind. Written by ruori every time it opens or closes that window; only meaningful while the manager loop is running."
+    resources_scope "Worktree"
+    resources_entry "$worktree_path/$CLAUDE_STATUS_FILENAME" "You don't write this, but it's worth knowing about: it's what makes the picker's CLAUDE (busy/waiting/idle) column work for this worktree. Written by Claude Code's own hooks -- baked into this repo's container image by the setup skill 'ruori init' installs, never by ruori itself -- every time Claude's status changes. Only present/updated if this worktree runs in container mode. Gitignored: make sure your **global** gitignore excludes it, or 'git worktree remove' will refuse to remove this worktree."
+    resources_entry "$worktree_path/$AGENT_USAGE_FILENAME" "Same story as the status file above: not written by ruori, but it's the only working source of the USAGE number for a worktree running in a container (its own ~/.claude/projects isn't visible to the host -- see Global above). Written by that same container-baked Claude Code hook each time Claude goes idle, as a running total. Also needs the global-gitignore entry mentioned above."
+
+    resources_section "Configuration"
+    resources_scope "Global"
+    resources_none
+    resources_scope "Repository"
+    resources_entry "$main_worktree_path/$CONFIG_FILENAME" "Yours to write and edit -- ruori never creates or modifies it, only reads it. Tells ruori which gitignored files to copy into a fresh worktree ('copy') and whether/how to run this repo in container mode ('container*' directives). Read fresh on every ruori invocation; see docs/config-file.md."
+    resources_entry "$main_worktree_path/$dockerfile_rel" "Yours to write, usually via the ruori-setup-repo skill from 'ruori init' -- ruori only reads it, to 'docker build' this repo's shared image. Only matters if $CONFIG_FILENAME has 'container on'; ruori never looks at it otherwise. Read (and rebuilt from) fresh on every container start, so editing it takes effect on your next switch."
+    resources_entry "$main_worktree_path/.claude/skills/ruori-setup-repo/SKILL.md" "Generated once by 'ruori init'; after that it's yours to commit -- ruori itself never reads it back, it's written purely for a Claude Code session to run. Re-run 'ruori init' only if you want it regenerated from a newer ruori install."
+    resources_scope "Worktree"
+    resources_none
+
+    resources_section "Managed resources"
+    resources_scope "Global"
+    resources_none
+    resources_scope "Repository"
+    if container_mode_enabled; then
+      resources_entry "$(container_image_for)" "Not something you manage day to day. One Docker image shared by every worktree of this repo, built by ruori from the Dockerfile above the first time it's needed, and rebuilt (Docker's own layer cache keeps repeat builds fast) the next time you switch to any worktree after you change that Dockerfile."
+    else
+      resources_entry "(none)" "Container mode is off for this repo, so ruori builds no image -- see the 'container' directive in $CONFIG_FILENAME to turn it on."
+    fi
+    resources_scope "Worktree"
+    resources_entry "$worktree_session" "Not a file, though 'tmux attach -t $worktree_session' works if you want to look. ruori creates this tmux session (or reuses it if already running) the moment you switch to this worktree; it keeps running in the background after you switch away, until 'ruori rm'/Ctrl-D kills it."
+    if container_mode_enabled; then
+      resources_entry "$worktree_session" "This worktree's Docker container -- same name as its tmux session above. Created by ruori the first time you switch to this worktree; stopped (not removed) when its tmux session is killed, and only actually removed by 'ruori rm'."
+      resources_entry "(recorded in $common_dir/ruori-ports, once allocated)" "Not something you manage directly -- see 'ruori ports' for this worktree's live host-port mapping, if its container has started at least once. Allocated by ruori the first time this worktree's container starts, and freed when the worktree is removed."
+    fi
+    exit 0
+    ;;
   switch)
     ;;
   new)
@@ -1524,7 +1624,7 @@ case "$cmd" in
     exit 0
     ;;
   *)
-    echo "ruori: unknown command '$cmd' (expected 'switch', 'new', 'list', 'rm', or 'ports')" >&2
+    echo "ruori: unknown command '$cmd' (expected 'switch', 'new', 'list', 'rm', 'ports', or 'resources')" >&2
     exit 1
     ;;
 esac
