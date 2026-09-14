@@ -1800,6 +1800,20 @@ case "$cmd" in
     ;;
 esac
 
+# Container mode is opt-in (see CONTAINER_MODE above) and strongly
+# recommended: host mode runs the tmux session -- and whatever agent it's
+# running with permission checks off -- directly on the host, able to touch
+# anything the host user account can. This is a per-run nudge, not a gate:
+# it always falls through to host mode on Enter, same as today. Only shown
+# on the interactive paths that reach the manager loop below ('switch'/
+# 'new'); one-shot commands (list/ports/rm/details/resources) exit inside
+# the case block above and never see it.
+if [ "$CONTAINER_MODE" != "1" ]; then
+  echo "ruori: container mode is OFF for this repo" >&2
+  echo "ruori: see https://github.com/Arch-vile/ruori/blob/main/readme.md for why and how you should use container mode" >&2
+  read -r -p "ruori: press Enter to continue in host mode... " _container_nudge_ack
+fi
+
 # Tracks the iTerm2 window opened for the currently-active worktree, so
 # switching worktrees replaces it instead of piling up one window per
 # switch. Empty until the first successful switch.

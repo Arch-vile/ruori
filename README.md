@@ -1,9 +1,9 @@
-# ruori
+<img src="resources/ruori-large.gif" width="240" alt="ruori picker demo">
+
+# Ruori
 
 A fast, one-key way to switch between git worktrees — and have your
 terminal, editor, and coding agent follow you there.
-
-<img src="resources/ruori-large.gif" width="240" alt="ruori picker demo">
 
 ## Why this exists
 
