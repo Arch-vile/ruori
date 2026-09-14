@@ -108,6 +108,50 @@ forwarded SSH inside the container, that needs a live bind-mount of
 `$SSH_AUTH_SOCK` (so key material never leaves the host), which doesn't
 fit the copy-in model above — it isn't set up by `ruori` today.
 
+## Recipe: GitHub CLI (`gh`) auth
+
+`gh` stores its login as a plain file — `~/.config/gh/hosts.yml` (or
+`$GH_CONFIG_DIR/hosts.yml` if you've set that env var) — with no
+OS-keychain involvement, so it fits the copy-in model above exactly
+like the Claude Code credentials example does.
+
+**Single identity, simplest case:**
+
+```
+container-copy ~/.config/gh/hosts.yml
+```
+
+Every worktree's container for this repo now has `gh` already
+authenticated the moment it's created — no `gh auth login` inside the
+container, ever.
+
+**Separate identities per repo (e.g. work vs. personal), with no `gh
+auth switch` on the host:** use `gh`'s own `GH_CONFIG_DIR` to keep each
+identity in its own directory on the host, once:
+
+```sh
+GH_CONFIG_DIR=~/.config/gh-work     gh auth login
+GH_CONFIG_DIR=~/.config/gh-personal gh auth login
+```
+
+Then point a given repo's `.ruori.conf` at the identity it should use,
+mapped onto `gh`'s normal *default* location inside the container so
+nothing in there needs to know `GH_CONFIG_DIR` exists:
+
+```
+container-copy ~/.config/gh-work:/root/.config/gh
+```
+
+A different repo's `.ruori.conf` can point at `~/.config/gh-personal`
+instead — each repo's containers get whichever identity its config
+names, independently, with the host's own `gh auth` never switched at
+all.
+
+This is still a one-time snapshot (see above): if you rotate or
+re-`gh auth login` an identity, `docker rm -f` the affected
+container(s) so `ruori` re-copies it fresh. The same security note
+applies too — these are real, usable credentials once copied in.
+
 ## Directive comparison — don't mix these up
 
 | Directive | Direction | Timing | Ends up... |

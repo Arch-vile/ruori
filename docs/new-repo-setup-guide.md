@@ -143,7 +143,10 @@ mode at all:
   installed.
 - How the dev server is started, and which port(s) it listens on.
 - Whether any host credentials need `container-copy`ing in (and their
-  exact host path) — e.g. an agent's own credentials file. Only ever
+  exact host path) — e.g. an agent's own credentials file, or GitHub
+  CLI auth (`~/.config/gh/hosts.yml`, or a per-identity `GH_CONFIG_DIR`
+  if the user keeps separate work/personal `gh` logins — see the
+  "GitHub CLI auth" recipe in the container sandbox guide). Only ever
   copy what the user explicitly names; never propose copying something
   by default.
 - **Whether the project depends on other backing services** (a
