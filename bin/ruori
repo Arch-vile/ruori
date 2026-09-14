@@ -644,10 +644,20 @@ container_start_if_needed() {
     port_flags+=(-p "127.0.0.1:${host_port}:${container_port}" -e "${env_name}=${host_port}")
   done < <(container_ports)
 
+  # RUORI_SHARED_DIR tells the image's own entrypoint/Dockerfile where
+  # this repo's shared, writable, cross-worktree storage lives inside
+  # the container -- today that's the common git dir (already bind-
+  # mounted above), but the env var is named for what it's *for*, not
+  # how it's implemented, so a repo's image can depend on it without
+  # caring if that changes later. Useful for anything that should
+  # persist or stay in sync across every worktree's container for this
+  # repo (e.g. a live-shared auth credential -- see
+  # docs/container-sandbox-guide.md's "Recipe: Claude Code auth").
   echo "ruori: creating container $name" >&2
   docker run -d --name "$name" \
     -v "$path:$path" \
     -v "$common_dir:$common_dir" \
+    -e "RUORI_SHARED_DIR=$common_dir" \
     "${port_flags[@]}" \
     "$(container_image_for)" sleep infinity >/dev/null
 
@@ -1482,6 +1492,7 @@ case "$cmd" in
     resources_scope "Repository"
     if container_mode_enabled; then
       resources_entry "$(container_image_for)" "Not something you manage day to day. One Docker image shared by every worktree of this repo, built by ruori from the Dockerfile above the first time it's needed, and rebuilt (Docker's own layer cache keeps repeat builds fast) the next time you switch to any worktree after you change that Dockerfile."
+      resources_entry "RUORI_SHARED_DIR (env var, inside any container)" "Not a file ruori manages -- an env var ruori injects into every worktree's container, pointing at this repo's shared, writable, cross-worktree storage (today, the common git dir above). Your own Dockerfile/entrypoint can read it to persist or live-share state across every worktree's container, e.g. a shared Claude Code login -- see docs/container-sandbox-guide.md's 'Recipe: Claude Code auth'. ruori itself never writes anything under it."
     else
       resources_entry "(none)" "Container mode is off for this repo, so ruori builds no image -- see the 'container' directive in $CONFIG_FILENAME to turn it on."
     fi

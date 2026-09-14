@@ -63,7 +63,12 @@ change:
    (build/start/stop, mounts, port allocation, one-time copy-in on
    creation) — it never decides what runs inside the tmux session
    started inside it, unlike host mode which hardcodes `claude --resume`
-   for a brand-new session.
+   for a brand-new session. Every container also gets `RUORI_SHARED_DIR`
+   (an env var pointing at the common git dir, already one of the two
+   bind mounts) so a repo's own image can persist or live-share state
+   across every worktree's container for that repo — see
+   `docs/container-sandbox-guide.md`'s "Recipe: Claude Code auth" for
+   the motivating use case.
 5. **Port allocation** (`allocate_port_for`/`ports_cache_file`) — a
    separate mechanism from env-file copying: ports are injected as
    container env vars, never written to a file, and are seeded
