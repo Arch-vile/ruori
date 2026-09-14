@@ -969,24 +969,38 @@ load_usage_cost_cache() {
   done <"$cache_file"
 }
 
-# Scans every top-level Claude Code session transcript
-# (~/.claude/projects/*/*.jsonl — deliberately not the */subagents/*.jsonl
-# ones nested under a session: those never carry their own "cost-state"
-# line, since their cost is already rolled into the parent session's) for
-# ones whose cwd matches one of this repo's worktree paths, and sums each
-# matching file's last "cost-state" line's totalCostUSD (that field is
-# already a running total for the session, so only the last one per file
-# counts). Persists via save_usage_cost_cache. Silently leaves
-# usage_cost_map empty if `jq` is missing or there's no
-# ~/.claude/projects directory (e.g. Claude Code hooks were never used
-# here) — best-effort extra, like the PR column.
+# Scans every top-level Claude Code session transcript under both
+# ~/.claude/projects (host-mode worktrees) and, for a container-mode
+# repo that shares Claude Code's login via a RUORI_SHARED_DIR
+# subdirectory (see docs/container-sandbox-guide.md's "Recipe: Claude
+# Code auth"), any <common-git-dir>/*/projects it finds too -- that
+# subdirectory name is a per-repo Dockerfile/entrypoint convention,
+# never ruori's to know, so this globs for the *shape* (something
+# directly under the common dir with its own projects/ folder) rather
+# than a specific name. Deliberately not */subagents/*.jsonl, nested
+# under a session: those never carry their own "cost-state" line,
+# since their cost is already rolled into the parent session's. Sums
+# each matching file's last "cost-state" line's totalCostUSD (that
+# field is already a running total for the session, so only the last
+# one per file counts) for files whose cwd matches one of this repo's
+# worktree paths. Persists via save_usage_cost_cache. Silently skips a
+# scan root if `jq` is missing or it doesn't exist (e.g. Claude Code
+# hooks were never used, or this repo doesn't share auth this way) —
+# best-effort extra, like the PR column.
 fetch_usage_costs() {
   usage_cost_map=()
   usage_cost_ever_fetched=1
   command -v jq >/dev/null 2>&1 || { save_usage_cost_cache; return 0; }
 
-  local projects_dir="$HOME/.claude/projects"
-  [ -d "$projects_dir" ] || { save_usage_cost_cache; return 0; }
+  local -a projects_dirs=("$HOME/.claude/projects")
+  local common_dir shared_projects_dir
+  common_dir="$(git_common_dir)" 2>/dev/null || common_dir=""
+  if [ -n "$common_dir" ]; then
+    for shared_projects_dir in "$common_dir"/*/projects; do
+      [ -d "$shared_projects_dir" ] || continue
+      projects_dirs+=("$shared_projects_dir")
+    done
+  fi
 
   # Fast membership check so we skip the (more expensive) cost extraction
   # for the many session files that belong to other repos entirely.
@@ -996,21 +1010,24 @@ fetch_usage_costs() {
     wanted_paths["$p"]=1
   done
 
-  local f cwd cost
-  for f in "$projects_dir"/*/*.jsonl; do
-    [ -f "$f" ] || continue
-    # Both greps legitimately return 1 (no match) for plenty of files —
-    # e.g. a session with no recorded cwd, or one that ended before any
-    # cost-state checkpoint was written — and pipefail would otherwise
-    # turn that into a script-ending failure via `set -e` on the
-    # assignment itself, before the `[ -n ... ] || continue` below even
-    # runs.
-    cwd="$(grep -m1 '"cwd":"' "$f" 2>/dev/null | jq -r '.cwd // empty' 2>/dev/null)" || true
-    [ -n "$cwd" ] || continue
-    [ -n "${wanted_paths[$cwd]:-}" ] || continue
-    cost="$(grep '"type":"cost-state"' "$f" 2>/dev/null | tail -1 | jq -r '.totalCostUSD // empty' 2>/dev/null)" || true
-    [ -n "$cost" ] || continue
-    usage_cost_map["$cwd"]="$(printf '%s\n%s\n' "${usage_cost_map[$cwd]:-0}" "$cost" | jq -s 'add')"
+  local projects_dir f cwd cost
+  for projects_dir in "${projects_dirs[@]}"; do
+    [ -d "$projects_dir" ] || continue
+    for f in "$projects_dir"/*/*.jsonl; do
+      [ -f "$f" ] || continue
+      # Both greps legitimately return 1 (no match) for plenty of files —
+      # e.g. a session with no recorded cwd, or one that ended before any
+      # cost-state checkpoint was written — and pipefail would otherwise
+      # turn that into a script-ending failure via `set -e` on the
+      # assignment itself, before the `[ -n ... ] || continue` below even
+      # runs.
+      cwd="$(grep -m1 '"cwd":"' "$f" 2>/dev/null | jq -r '.cwd // empty' 2>/dev/null)" || true
+      [ -n "$cwd" ] || continue
+      [ -n "${wanted_paths[$cwd]:-}" ] || continue
+      cost="$(grep '"type":"cost-state"' "$f" 2>/dev/null | tail -1 | jq -r '.totalCostUSD // empty' 2>/dev/null)" || true
+      [ -n "$cost" ] || continue
+      usage_cost_map["$cwd"]="$(printf '%s\n%s\n' "${usage_cost_map[$cwd]:-0}" "$cost" | jq -s 'add')"
+    done
   done
 
   save_usage_cost_cache
@@ -1463,7 +1480,7 @@ case "$cmd" in
 
     resources_section "Book-keeping"
     resources_scope "Global"
-    resources_entry "$HOME/.claude/projects" "Not ruori's own file -- Claude Code's own session-transcript log, which Claude Code writes on its own with no setup. Nothing to manage yourself. ruori only reads it, to total up USAGE for a worktree whose Claude Code runs directly on the host (not in a container); it's updated continuously by Claude Code itself while a session runs there. For a worktree in container mode this path is irrelevant -- its own transcripts live inside the container instead; see .ruori-agent-usage under Worktree below."
+    resources_entry "$HOME/.claude/projects" "Not ruori's own file -- Claude Code's own session-transcript log, which Claude Code writes on its own with no setup. Nothing to manage yourself. ruori only reads it, to total up USAGE for a worktree whose Claude Code runs directly on the host (not in a container); it's updated continuously by Claude Code itself while a session runs there. For a worktree in container mode this path is irrelevant -- its own transcripts live inside the container instead, unless this repo shares Claude Code's login via a RUORI_SHARED_DIR subdirectory (see docs/container-sandbox-guide.md's 'Recipe: Claude Code auth'), in which case ruori also scans <common-git-dir>/*/projects the same way; otherwise see .ruori-agent-usage under Worktree below."
     resources_scope "Repository"
     resources_entry "$common_dir/ruori-current-worktree" "Internal to ruori, no need to open it. Remembers which worktree you last switched to, so the picker's * marker survives across separate 'ruori' runs. Written by ruori itself on every switch; read once on startup."
     resources_entry "$common_dir/ruori-activation-times" "Internal to ruori, safe to delete. One line per worktree with the epoch time it was last activated, used only to sort the picker/list so your most recently used worktree sorts first. Rewritten by ruori every time you switch to a worktree."
@@ -1474,7 +1491,7 @@ case "$cmd" in
     resources_entry "$common_dir/ruori-iterm-window" "Internal to ruori. Tracks the single iTerm2 window id the manager loop currently owns, so switching worktrees closes the right window before opening a new one instead of leaking windows behind. Written by ruori every time it opens or closes that window; only meaningful while the manager loop is running."
     resources_scope "Worktree"
     resources_entry "$worktree_path/$CLAUDE_STATUS_FILENAME" "You don't write this, but it's worth knowing about: it's what makes the picker's CLAUDE (busy/waiting/idle) column work for this worktree. Written by Claude Code's own hooks -- baked into this repo's container image by the setup skill 'ruori init' installs, never by ruori itself -- every time Claude's status changes. Only present/updated if this worktree runs in container mode. Gitignored: make sure your **global** gitignore excludes it, or 'git worktree remove' will refuse to remove this worktree."
-    resources_entry "$worktree_path/$AGENT_USAGE_FILENAME" "Same story as the status file above: not written by ruori, but it's the only working source of the USAGE number for a worktree running in a container (its own ~/.claude/projects isn't visible to the host -- see Global above). Written by that same container-baked Claude Code hook each time Claude goes idle, as a running total. Also needs the global-gitignore entry mentioned above."
+    resources_entry "$worktree_path/$AGENT_USAGE_FILENAME" "Same story as the status file above: not written by ruori, and takes priority over the host-side scan when present and fresh (see Global above) -- the working source of the USAGE number for a worktree running in a container that does NOT share Claude Code's login via RUORI_SHARED_DIR (its own ~/.claude/projects isn't visible to the host otherwise). Written by that same container-baked Claude Code hook each time Claude goes idle, as a running total, if that hook computes one -- this repo's own hook doesn't (see docs/container-sandbox-guide.md's 'Recipe: Claude Code auth'), relying on the host-side scan instead. Also needs the global-gitignore entry mentioned above."
 
     resources_section "Configuration"
     resources_scope "Global"

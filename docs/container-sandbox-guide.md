@@ -240,6 +240,17 @@ log in again; when that happens, just log in again in any one
 container — every other container picks it up the same way it did the
 first time.
 
+**Bonus: your status hook no longer needs to compute usage.** If your
+container-baked Claude Code status hook also writes a running cost
+total to `.ruori-agent-usage` (see `docs/container-sandbox-plan.md`),
+you can drop that half once you adopt this recipe — session transcripts
+under `$shared_claude_dir/projects` are now host-visible, so `ruori`'s
+own `USAGE` column reads them directly the same way it already does
+for host-mode worktrees (see `docs/dashboard-columns.md`). Keep writing
+`.ruori-claude-status` for the live busy/waiting/idle signal — that one
+still needs the hook, since it's event-driven and has no transcript
+equivalent.
+
 ## Recipe: GitHub CLI (`gh`) auth
 
 `gh` stores its login as a plain file — `~/.config/gh/hosts.yml` (or

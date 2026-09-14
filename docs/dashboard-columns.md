@@ -126,6 +126,19 @@ network calls, no separate accounting setup. Same `?`/`-` distinction
 as `PR`: `?` means never fetched, `-` means fetched and genuinely $0 (no
 Claude Code session has ever run there).
 
+For a container-mode worktree, `~/.claude/projects` normally lives
+*inside* the container, invisible to the host — the `.ruori-agent-usage`
+file (see `docs/container-sandbox-plan.md`) exists to bridge that,
+written by a container-baked hook and read here with priority over the
+scan above. But if a repo shares Claude Code's login live across every
+worktree's container via `RUORI_SHARED_DIR` (see
+`docs/container-sandbox-guide.md`'s "Recipe: Claude Code auth"),
+session transcripts become host-visible under
+`<common-git-dir>/*/projects` too, and the scan above picks them up
+directly — no in-container hook needed for usage at all in that case
+(this repo's own `.devcontainer/ruori-claude-status-hook` is an
+example: it only writes status, not a usage total).
+
 Like `PR`, this is *not* refreshed by Ctrl-R — computing it means
 scanning every Claude Code session transcript on the machine to find
 the ones that belong to this repo's worktrees, which gets slower as

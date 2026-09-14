@@ -87,7 +87,14 @@ change:
    itself on the host. Container mode is the only way the `CLAUDE`
    column becomes live, because hooks there are baked into the repo's
    own Dockerfile via `ruori init` rather than the host's Claude Code
-   config.
+   config. `.ruori-agent-usage` is optional, not required, alongside
+   it: `fetch_usage_costs` also scans any `<common-git-dir>/*/projects`
+   it finds (populated by a repo sharing Claude Code's login via
+   `RUORI_SHARED_DIR` — see `docs/container-sandbox-guide.md`'s
+   "Recipe: Claude Code auth"), so a repo using that recipe can drop
+   the usage half of its hook and rely on the host-side scan instead;
+   `.ruori-claude-status` still needs the hook regardless, since status
+   is event-driven with no transcript equivalent.
 8. **iTerm2 window lifecycle** (`open_iterm_window_for` and the
    `*_iterm_window_id`/`iterm_log_file` machinery) — tracks the one
    currently-open window so a switch replaces it instead of piling up

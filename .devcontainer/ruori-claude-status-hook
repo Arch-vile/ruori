@@ -1,19 +1,27 @@
 #!/usr/bin/env bash
 # ruori-claude-status-hook - records Claude Code's busy/waiting/idle status
-# (and, on "idle", a running usage-cost total) for the current worktree,
-# so ruori's picker can show it. Invoked as a Claude Code hook with one of
-# three status arguments: busy, waiting, idle. Reads the hook's JSON
-# payload from stdin (needs "cwd") and writes to two fixed filenames at
-# the worktree root ("$cwd" — the same directory ruori bind-mounts into
-# this container, so the host sees the same files with no extra
-# plumbing). Deliberately silent/non-blocking: any failure (bad
-# payload, no cwd, unwritable worktree) just exits 0 without writing
-# anything, so this can never interfere with a normal Claude Code
-# session.
+# for the current worktree, so ruori's picker can show it. Invoked as a
+# Claude Code hook with one of three status arguments: busy, waiting,
+# idle. Reads the hook's JSON payload from stdin (needs "cwd") and
+# writes a fixed filename at the worktree root ("$cwd" — the same
+# directory ruori bind-mounts into this container, so the host sees the
+# same file with no extra plumbing). Deliberately silent/non-blocking:
+# any failure (bad payload, no cwd, unwritable worktree) just exits 0
+# without writing anything, so this can never interfere with a normal
+# Claude Code session.
+#
+# Doesn't compute a usage-cost total (older versions of this hook did,
+# writing .ruori-agent-usage on "idle") -- this repo shares Claude
+# Code's login live across every worktree's container via
+# RUORI_SHARED_DIR (see docs/container-sandbox-guide.md's "Recipe:
+# Claude Code auth"), which makes session transcripts host-visible
+# under <common-git-dir>/*/projects. ruori's own USAGE column reads
+# that directly now, the same way it already does for host-mode
+# worktrees, so this hook doesn't need to compute or hand off a total
+# at all.
 set -euo pipefail
 
 STATUS_FILENAME=".ruori-claude-status"
-AGENT_USAGE_FILENAME=".ruori-agent-usage"
 
 status="${1:-}"
 case "$status" in
@@ -30,21 +38,5 @@ cwd="$(printf '%s' "$payload" | jq -r '.cwd // empty' 2>/dev/null || true)"
 [ -n "$cwd" ] && [ -d "$cwd" ] || exit 0
 
 printf '%s\n%s\n' "$status" "$(date +%s)" >"$cwd/$STATUS_FILENAME" 2>/dev/null || true
-
-if [ "$status" = "idle" ]; then
-  projects_dir="$HOME/.claude/projects"
-  total="0"
-  if [ -d "$projects_dir" ]; then
-    for f in "$projects_dir"/*/*.jsonl; do
-      [ -f "$f" ] || continue
-      file_cwd="$(grep -m1 '"cwd":"' "$f" 2>/dev/null | jq -r '.cwd // empty' 2>/dev/null)" || true
-      [ "$file_cwd" = "$cwd" ] || continue
-      file_cost="$(grep '"type":"cost-state"' "$f" 2>/dev/null | tail -1 | jq -r '.totalCostUSD // empty' 2>/dev/null)" || true
-      [ -n "$file_cost" ] || continue
-      total="$(printf '%s\n%s\n' "$total" "$file_cost" | jq -s 'add')"
-    done
-  fi
-  printf '%s\n%s\n' "$total" "$(date +%s)" >"$cwd/$AGENT_USAGE_FILENAME" 2>/dev/null || true
-fi
 
 exit 0
