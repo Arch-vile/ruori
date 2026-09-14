@@ -655,6 +655,11 @@ container_start_if_needed() {
   while IFS=$'\t' read -r host_path container_path; do
     [ -n "$host_path" ] || continue
     if [ -e "$host_path" ]; then
+      # docker cp fails outright ("Could not find the file <parent> in
+      # container") if container_path's parent directory doesn't already
+      # exist in the image -- unlike `cp -T`, it never creates missing
+      # intermediate directories on the destination side.
+      docker exec "$name" mkdir -p "$(dirname "$container_path")"
       docker cp "$host_path" "$name:$container_path"
     else
       echo "ruori: container-copy: host path not found, skipping: $host_path" >&2
