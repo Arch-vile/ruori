@@ -11,17 +11,20 @@
 # Claude Code session.
 #
 # Doesn't compute a usage-cost total (older versions of this hook did,
-# writing .ruori-agent-usage on "idle") -- this repo shares Claude
+# writing .ruori/agent-usage on "idle") -- this repo shares Claude
 # Code's login live across every worktree's container via
 # RUORI_SHARED_DIR (see docs/container-sandbox-guide.md's "Recipe:
 # Claude Code auth"), which makes session transcripts host-visible
-# under <common-git-dir>/*/projects. ruori's own USAGE column reads
-# that directly now, the same way it already does for host-mode
-# worktrees, so this hook doesn't need to compute or hand off a total
-# at all.
+# under RUORI_SHARED_DIR's own <something>/projects. ruori's own USAGE
+# column reads that directly now, the same way it already does for
+# host-mode worktrees, so this hook doesn't need to compute or hand off
+# a total at all.
 set -euo pipefail
 
-STATUS_FILENAME=".ruori-claude-status"
+# Lives under one .ruori/ subdirectory rather than as a loose dotfile,
+# so a single **global** gitignore entry for the directory (not this
+# specific filename) is enough -- see docs/new-repo-setup-guide.md.
+STATUS_FILENAME=".ruori/claude-status"
 
 status="${1:-}"
 case "$status" in
@@ -37,6 +40,7 @@ cwd="$(printf '%s' "$payload" | jq -r '.cwd // empty' 2>/dev/null || true)"
 
 [ -n "$cwd" ] && [ -d "$cwd" ] || exit 0
 
+mkdir -p "$cwd/.ruori" 2>/dev/null || exit 0
 printf '%s\n%s\n' "$status" "$(date +%s)" >"$cwd/$STATUS_FILENAME" 2>/dev/null || true
 
 exit 0

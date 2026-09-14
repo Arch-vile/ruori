@@ -64,11 +64,11 @@ change:
    creation) — it never decides what runs inside the tmux session
    started inside it, unlike host mode which hardcodes `claude --resume`
    for a brand-new session. Every container also gets `RUORI_SHARED_DIR`
-   (an env var pointing at the common git dir, already one of the two
-   bind mounts) so a repo's own image can persist or live-share state
-   across every worktree's container for that repo — see
-   `docs/container-sandbox-guide.md`'s "Recipe: Claude Code auth" for
-   the motivating use case.
+   (an env var pointing at a subdirectory of the common git dir, already
+   one of the two bind mounts) so a repo's own image can persist or
+   live-share state across every worktree's container for that repo —
+   see `docs/container-sandbox-guide.md`'s "Recipe: Claude Code auth"
+   for the motivating use case.
 5. **Port allocation** (`allocate_port_for`/`ports_cache_file`) — a
    separate mechanism from env-file copying: ports are injected as
    container env vars, never written to a file, and are seeded
@@ -80,20 +80,21 @@ change:
    or a full scan of `~/.claude/projects/*/*.jsonl`) and only runs from
    the picker's Ctrl-F binding. Both persist through a file so state
    survives across the separate subprocesses fzf's `reload` spawns.
-7. **Claude Code status integration** — `.ruori-claude-status` and
-   `.ruori-agent-usage` are files an *external* agent hook writes at a
-   worktree's root (see `docs/dashboard-columns.md`); `ruori` only reads
-   them, host/container-transparently, and never installs any hook
-   itself on the host. Container mode is the only way the `CLAUDE`
-   column becomes live, because hooks there are baked into the repo's
-   own Dockerfile via `ruori init` rather than the host's Claude Code
-   config. `.ruori-agent-usage` is optional, not required, alongside
-   it: `fetch_usage_costs` also scans any `<common-git-dir>/*/projects`
+7. **Claude Code status integration** — `.ruori/claude-status` and
+   `.ruori/agent-usage` are files an *external* agent hook writes under
+   one `.ruori/` subdirectory at a worktree's root (see
+   `docs/dashboard-columns.md`); `ruori` only reads them,
+   host/container-transparently, and never installs any hook itself on
+   the host. Container mode is the only way the `CLAUDE` column becomes
+   live, because hooks there are baked into the repo's own Dockerfile
+   via `ruori init` rather than the host's Claude Code config.
+   `.ruori/agent-usage` is optional, not required, alongside it:
+   `fetch_usage_costs` also scans any `<ruori-state-dir>/shared/*/projects`
    it finds (populated by a repo sharing Claude Code's login via
    `RUORI_SHARED_DIR` — see `docs/container-sandbox-guide.md`'s
    "Recipe: Claude Code auth"), so a repo using that recipe can drop
    the usage half of its hook and rely on the host-side scan instead;
-   `.ruori-claude-status` still needs the hook regardless, since status
+   `.ruori/claude-status` still needs the hook regardless, since status
    is event-driven with no transcript equivalent.
 8. **iTerm2 window lifecycle** (`open_iterm_window_for` and the
    `*_iterm_window_id`/`iterm_log_file` machinery) — tracks the one
@@ -104,10 +105,13 @@ change:
    the hardest part of the script to debug after the fact (see
    `docs/troubleshooting.md`).
 9. **Per-repo state files** — all cache/state files (activation times,
-   ports, current-worktree, PR-status, usage-cost, iTerm window id/log)
-   live under the repo's *common* git dir (`git rev-parse
-   --git-common-dir`), keyed so every worktree of a repo shares one copy
-   rather than each worktree getting its own.
+   ports, current-worktree, PR-status, usage-cost, iTerm window id/log,
+   and RUORI_SHARED_DIR) live together under one `ruori/` subdirectory
+   of the repo's *common* git dir (`ruori_state_dir`, built on `git
+   rev-parse --git-common-dir`) rather than as loose ruori-prefixed
+   files directly in it, so all of it can be cleared in one `rm -rf`;
+   keyed so every worktree of a repo shares one copy rather than each
+   worktree getting its own.
 10. **Commands** (the big `case "$cmd" in` block) — user-facing:
     `switch` (default, the manager loop), `new`, `list`, `rm`, `ports`,
     `details`, `resources`, `init`. Hidden, invoked only by the picker's

@@ -198,17 +198,19 @@ Claude Code config on their machine.
 How it works: seven Claude Code hook events (`UserPromptSubmit`,
 `PreToolUse`, `PostToolUse`, `PermissionRequest`, `Elicitation`,
 `ElicitationResult`, `Stop`) all invoke one script with a status
-argument, which writes `busy`/`waiting`/`idle` to `.ruori-claude-status`
+argument, which writes `busy`/`waiting`/`idle` to `.ruori/claude-status`
 at the worktree root, and (on `idle`) a running cost total to
-`.ruori-agent-usage` there too. `ruori` already bind-mounts the worktree
-root into the container (see above), so a file written there from
-inside the container is the exact same file `ruori` reads from the host
-— no extra plumbing needed, and both files are already covered by the
+`.ruori/agent-usage` there too — both under one `.ruori/` subdirectory
+(the script creates it), not as loose dotfiles, so a single gitignore
+entry covers both. `ruori` already bind-mounts the worktree root into
+the container (see above), so a file written there from inside the
+container is the exact same file `ruori` reads from the host — no
+extra plumbing needed, and that directory is already covered by the
 end user's **global** gitignore if they've used `ruori` in container mode
 before (if this is their first container-mode repo, mention it: they
-should add `.ruori-claude-status` and `.ruori-agent-usage` to their global
-`git config --global core.excludesFile` once, otherwise `git worktree
-remove` will refuse to remove a worktree these files are sitting in).
+should add `.ruori/` to their global `git config --global
+core.excludesFile` once, otherwise `git worktree remove` will refuse to
+remove a worktree it's sitting in).
 
 Write these two files next to the Dockerfile (e.g. in `.devcontainer/`
 alongside it), then `COPY` them in:
@@ -230,8 +232,11 @@ alongside it), then `COPY` them in:
 # session.
 set -euo pipefail
 
-STATUS_FILENAME=".ruori-claude-status"
-AGENT_USAGE_FILENAME=".ruori-agent-usage"
+# Both live under one .ruori/ subdirectory rather than as loose
+# dotfiles, so a single global gitignore entry for the directory (not
+# either specific filename) is enough.
+STATUS_FILENAME=".ruori/claude-status"
+AGENT_USAGE_FILENAME=".ruori/agent-usage"
 
 status="${1:-}"
 case "$status" in
@@ -247,6 +252,7 @@ cwd="$(printf '%s' "$payload" | jq -r '.cwd // empty' 2>/dev/null || true)"
 
 [ -n "$cwd" ] && [ -d "$cwd" ] || exit 0
 
+mkdir -p "$cwd/.ruori" 2>/dev/null || exit 0
 printf '%s\n%s\n' "$status" "$(date +%s)" >"$cwd/$STATUS_FILENAME" 2>/dev/null || true
 
 if [ "$status" = "idle" ]; then

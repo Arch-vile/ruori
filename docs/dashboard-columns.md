@@ -47,7 +47,7 @@ you right now, and which are just waiting around — without leaving the
 picker.
 
 This works by having several Claude Code hooks write status to a
-`.ruori-claude-status` file right at the root of the worktree the
+`.ruori/claude-status` file right at the root of the worktree the
 session is running in, which `ruori` reads. It's not just
 `UserPromptSubmit`/`Stop`: `Stop` fires the moment the *main* agent
 hands off to a subagent (Task tool), well before that subagent
@@ -109,7 +109,7 @@ instead — one key refreshes both `PR` and `USAGE` (see below) rather
 than a separate refresh per column. Every other reload (Ctrl-R, Ctrl-X,
 Ctrl-D, looping back after a switch) reuses whatever Ctrl-F last
 fetched, cached on disk at
-`<git-common-dir>/ruori-pr-status.cache` (shared by every worktree of
+`<git-common-dir>/ruori/pr-status.cache` (shared by every worktree of
 the repo) so it survives across the `fzf reload`s each of those spawn
 as a fresh process. Until you press Ctrl-F at least once, `PR` shows
 `?` for everything, not `-`.
@@ -127,24 +127,24 @@ as `PR`: `?` means never fetched, `-` means fetched and genuinely $0 (no
 Claude Code session has ever run there).
 
 For a container-mode worktree, `~/.claude/projects` normally lives
-*inside* the container, invisible to the host — the `.ruori-agent-usage`
+*inside* the container, invisible to the host — the `.ruori/agent-usage`
 file (see `docs/container-sandbox-plan.md`) exists to bridge that,
 written by a container-baked hook and read here with priority over the
 scan above. But if a repo shares Claude Code's login live across every
 worktree's container via `RUORI_SHARED_DIR` (see
 `docs/container-sandbox-guide.md`'s "Recipe: Claude Code auth"),
 session transcripts become host-visible under
-`<common-git-dir>/*/projects` too, and the scan above picks them up
-directly — no in-container hook needed for usage at all in that case
-(this repo's own `.devcontainer/ruori-claude-status-hook` is an
-example: it only writes status, not a usage total).
+`<git-common-dir>/ruori/shared/*/projects` too, and the scan above
+picks them up directly — no in-container hook needed for usage at all
+in that case (this repo's own `.devcontainer/ruori-claude-status-hook`
+is an example: it only writes status, not a usage total).
 
 Like `PR`, this is *not* refreshed by Ctrl-R — computing it means
 scanning every Claude Code session transcript on the machine to find
 the ones that belong to this repo's worktrees, which gets slower as
 your overall Claude Code history grows regardless of how many
 worktrees this repo has. **Ctrl-F** refreshes `USAGE` too; it's cached
-on disk at `<git-common-dir>/ruori-usage-cost.cache` the same way `PR`'s
+on disk at `<git-common-dir>/ruori/usage-cost.cache` the same way `PR`'s
 cache works, keyed by worktree path (not branch, since the cost is tied
 to which directory the sessions ran in). Until you press Ctrl-F at
 least once, `USAGE` shows `?` for everything.

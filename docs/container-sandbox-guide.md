@@ -76,10 +76,10 @@ mode does and doesn't sandbox" above for why.
 Every container also gets one env var set automatically, no directive
 needed: `RUORI_SHARED_DIR`, pointing at a directory inside the
 container that's shared, writable, and identical across **every
-worktree's container for this repo** — today that's the common git dir
-(already one of the two bind mounts above), but the name describes what
-it's *for*, not how it's implemented, so don't hardcode assumptions
-about that.
+worktree's container for this repo** — today that's a subdirectory of
+the common git dir (already one of the two bind mounts above, so
+nothing extra needs mounting), but the name describes what it's *for*,
+not how it's implemented, so don't hardcode assumptions about that.
 
 `ruori` itself never writes anything under it — it's purely there for
 your own Dockerfile/entrypoint to build on, for anything that should
@@ -242,12 +242,12 @@ first time.
 
 **Bonus: your status hook no longer needs to compute usage.** If your
 container-baked Claude Code status hook also writes a running cost
-total to `.ruori-agent-usage` (see `docs/container-sandbox-plan.md`),
+total to `.ruori/agent-usage` (see `docs/container-sandbox-plan.md`),
 you can drop that half once you adopt this recipe — session transcripts
 under `$shared_claude_dir/projects` are now host-visible, so `ruori`'s
 own `USAGE` column reads them directly the same way it already does
 for host-mode worktrees (see `docs/dashboard-columns.md`). Keep writing
-`.ruori-claude-status` for the live busy/waiting/idle signal — that one
+`.ruori/claude-status` for the live busy/waiting/idle signal — that one
 still needs the hook, since it's event-driven and has no transcript
 equivalent.
 

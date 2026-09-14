@@ -13,7 +13,7 @@ moment, can look like "the previous worktree's window didn't close."
 `ruori` logs every step of this — which window id it thinks is active,
 every close it attempts (with the exit code and whether the window was
 still open immediately afterward), and every window it opens (with the
-raw AppleScript response) — to `<git-common-dir>/ruori-iterm.log`, e.g.
+raw AppleScript response) — to `<git-common-dir>/ruori/iterm.log`, e.g.
 run `git rev-parse --git-common-dir` from any worktree of the repo to
 find it, or just watch for the "logging iTerm2 window open/close
 activity to ..." line `ruori` prints on startup. It's appended to, not
@@ -24,7 +24,7 @@ iTerm2 just hadn't caught up yet) or never learned that window's id in
 the first place.
 
 The id of the window `ruori` is currently tracking is also persisted, to
-`<git-common-dir>/ruori-iterm-window`, so that **restarting `ruori`
+`<git-common-dir>/ruori/iterm-window`, so that **restarting `ruori`
 doesn't orphan the window it had open**. Before this, that id lived
 only in the running manager process: restarting `ruori` (to pick up an
 update, say) made the fresh process forget which window belonged to

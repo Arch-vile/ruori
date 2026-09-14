@@ -56,6 +56,42 @@ repo_name="$(basename "$repo_root")"
 # what a brand-new repo with no `ruori` history yet would show.
 current_worktree_path="$repo_root"
 
+# Absolute path to this repo's shared git common dir (where linked
+# worktrees' actual .git data lives) — one of the two paths bind-mounted
+# into a container (the other being the worktree's own directory),
+# required so a worktree's .git file (which points at an absolute host
+# path inside this dir) resolves the same way inside the container.
+# Defined this early (rather than down in the container-mode section
+# below, where it conceptually belongs) because several state-file
+# functions need it long before that section is reached, and bash only
+# knows a function once it's read past its own definition.
+git_common_dir() {
+  local common_dir
+  common_dir="$(cd "$repo_root" && git rev-parse --git-common-dir 2>/dev/null)" || return 1
+  case "$common_dir" in
+    /*) ;;
+    *) common_dir="$repo_root/$common_dir" ;;
+  esac
+  printf '%s' "$common_dir"
+}
+
+# Every piece of ruori's own per-repo state (activation times, current-
+# worktree, PR/usage caches, iTerm tracking, port allocations, and any
+# shared container storage — see RUORI_SHARED_DIR in the container-mode
+# section below) lives together under one subdirectory of the common
+# git dir, rather than as loose ruori-prefixed files scattered directly
+# in it — so all of it can be cleared in one shot (`rm -rf` this
+# directory) without touching anything else there, and without needing
+# to know every individual filename first. Creates the directory on
+# demand since every caller immediately writes into or reads from it.
+ruori_state_dir() {
+  local common_dir dir
+  common_dir="$(git_common_dir)" || return 1
+  dir="$common_dir/ruori"
+  mkdir -p "$dir" 2>/dev/null || true
+  printf '%s' "$dir"
+}
+
 sanitize() {
   # tmux session names: avoid '.' and ':' which have special meaning
   printf '%s' "$1" | tr -c 'A-Za-z0-9_-' '-'
@@ -69,13 +105,9 @@ sanitize() {
 # (~creation order). Cached under the repo's common git dir, like the
 # current-worktree/PR/usage caches (see current_worktree_cache_file).
 activation_times_cache_file() {
-  local common_dir
-  common_dir="$(cd "$repo_root" && git rev-parse --git-common-dir 2>/dev/null)" || return 1
-  case "$common_dir" in
-    /*) ;;
-    *) common_dir="$repo_root/$common_dir" ;;
-  esac
-  printf '%s/ruori-activation-times' "$common_dir"
+  local state_dir
+  state_dir="$(ruori_state_dir)" || return 1
+  printf '%s/activation-times' "$state_dir"
 }
 
 declare -A activation_time_for_path
@@ -410,21 +442,6 @@ session_name_for() {
 # the main loop below) — this section only orchestrates the container's
 # own lifecycle: image build, start/stop, mounts, ports, copy-in.
 
-# Absolute path to this repo's shared git common dir (where linked
-# worktrees' actual .git data lives) — one of the two paths bind-mounted
-# into a container (the other being the worktree's own directory),
-# required so a worktree's .git file (which points at an absolute host
-# path inside this dir) resolves the same way inside the container.
-git_common_dir() {
-  local common_dir
-  common_dir="$(cd "$repo_root" && git rev-parse --git-common-dir 2>/dev/null)" || return 1
-  case "$common_dir" in
-    /*) ;;
-    *) common_dir="$repo_root/$common_dir" ;;
-  esac
-  printf '%s' "$common_dir"
-}
-
 # One image per repo (not per worktree) — the Dockerfile is the same
 # file regardless of which worktree uses it; only mounts/ports differ
 # per container instance.
@@ -523,9 +540,9 @@ container_build_if_needed() {
 # (keyed on the common git dir): one line per
 # "<session_name>\t<container_port>\t<host_port>".
 ports_cache_file() {
-  local common_dir
-  common_dir="$(git_common_dir)" || return 1
-  printf '%s/ruori-ports' "$common_dir"
+  local state_dir
+  state_dir="$(ruori_state_dir)" || return 1
+  printf '%s/ports' "$state_dir"
 }
 
 CONTAINER_PORT_BASE=20000
@@ -646,18 +663,22 @@ container_start_if_needed() {
 
   # RUORI_SHARED_DIR tells the image's own entrypoint/Dockerfile where
   # this repo's shared, writable, cross-worktree storage lives inside
-  # the container -- today that's the common git dir (already bind-
-  # mounted above), but the env var is named for what it's *for*, not
+  # the container -- today that's a subdirectory of the common git dir
+  # (already bind-mounted above), created on demand by whatever first
+  # writes under it, but the env var is named for what it's *for*, not
   # how it's implemented, so a repo's image can depend on it without
-  # caring if that changes later. Useful for anything that should
-  # persist or stay in sync across every worktree's container for this
-  # repo (e.g. a live-shared auth credential -- see
-  # docs/container-sandbox-guide.md's "Recipe: Claude Code auth").
+  # caring if that changes later. Lives under ruori's own state
+  # subdirectory (see ruori_state_dir) rather than loose in the common
+  # dir, so it's cleared right along with the rest of ruori's state by
+  # the same `rm -rf`. Useful for anything that should persist or stay
+  # in sync across every worktree's container for this repo (e.g. a
+  # live-shared auth credential -- see docs/container-sandbox-guide.md's
+  # "Recipe: Claude Code auth").
   echo "ruori: creating container $name" >&2
   docker run -d --name "$name" \
     -v "$path:$path" \
     -v "$common_dir:$common_dir" \
-    -e "RUORI_SHARED_DIR=$common_dir" \
+    -e "RUORI_SHARED_DIR=$common_dir/ruori/shared" \
     "${port_flags[@]}" \
     "$(container_image_for)" sleep infinity >/dev/null
 
@@ -711,9 +732,10 @@ require_docker_if_container_mode() {
 # Filename ruori-claude-status-hook (see docs/agent-hooks-setup-guide.md)
 # writes at the root of the worktree it's running in — the two sides
 # only need to agree on this name, not on any shared central location.
-# It must be excluded via the user's GLOBAL gitignore, not a per-repo
-# one — see the setup guide.
-CLAUDE_STATUS_FILENAME=".ruori-claude-status"
+# Lives under one .ruori/ subdirectory (alongside AGENT_USAGE_FILENAME
+# below) rather than as a loose dotfile, so a single **global**
+# gitignore entry for the directory covers both — see the setup guide.
+CLAUDE_STATUS_FILENAME=".ruori/claude-status"
 
 # Same host/container-transparent trick as CLAUDE_STATUS_FILENAME above,
 # extended to carry usage data (see docs/container-sandbox-plan.md
@@ -724,7 +746,7 @@ CLAUDE_STATUS_FILENAME=".ruori-claude-status"
 # ~/.claude/projects lives inside the container's own filesystem and is
 # never live-mounted. Generic, agent-owned extension point: `ruori` reads
 # it without knowing (or caring) which agent wrote it.
-AGENT_USAGE_FILENAME=".ruori-agent-usage"
+AGENT_USAGE_FILENAME=".ruori/agent-usage"
 
 # How stale an AGENT_USAGE_FILENAME reading can be before usage_cost_for
 # ignores it and falls back to the host-side jsonl scan instead — guards
@@ -771,13 +793,9 @@ pr_status_ever_fetched=0
 # repo's *common* git dir (not the worktree-specific one) so every
 # worktree of this repo shares one PR-status cache, keyed on branch name.
 pr_status_cache_file() {
-  local common_dir
-  common_dir="$(cd "$repo_root" && git rev-parse --git-common-dir 2>/dev/null)" || return 1
-  case "$common_dir" in
-    /*) ;;
-    *) common_dir="$repo_root/$common_dir" ;;
-  esac
-  printf '%s/ruori-pr-status.cache' "$common_dir"
+  local state_dir
+  state_dir="$(ruori_state_dir)" || return 1
+  printf '%s/pr-status.cache' "$state_dir"
 }
 
 save_pr_status_cache() {
@@ -935,13 +953,9 @@ declare -A usage_cost_map
 usage_cost_ever_fetched=0
 
 usage_cost_cache_file() {
-  local common_dir
-  common_dir="$(cd "$repo_root" && git rev-parse --git-common-dir 2>/dev/null)" || return 1
-  case "$common_dir" in
-    /*) ;;
-    *) common_dir="$repo_root/$common_dir" ;;
-  esac
-  printf '%s/ruori-usage-cost.cache' "$common_dir"
+  local state_dir
+  state_dir="$(ruori_state_dir)" || return 1
+  printf '%s/usage-cost.cache' "$state_dir"
 }
 
 save_usage_cost_cache() {
@@ -971,32 +985,33 @@ load_usage_cost_cache() {
 
 # Scans every top-level Claude Code session transcript under both
 # ~/.claude/projects (host-mode worktrees) and, for a container-mode
-# repo that shares Claude Code's login via a RUORI_SHARED_DIR
-# subdirectory (see docs/container-sandbox-guide.md's "Recipe: Claude
-# Code auth"), any <common-git-dir>/*/projects it finds too -- that
-# subdirectory name is a per-repo Dockerfile/entrypoint convention,
-# never ruori's to know, so this globs for the *shape* (something
-# directly under the common dir with its own projects/ folder) rather
-# than a specific name. Deliberately not */subagents/*.jsonl, nested
-# under a session: those never carry their own "cost-state" line,
-# since their cost is already rolled into the parent session's. Sums
-# each matching file's last "cost-state" line's totalCostUSD (that
-# field is already a running total for the session, so only the last
-# one per file counts) for files whose cwd matches one of this repo's
-# worktree paths. Persists via save_usage_cost_cache. Silently skips a
-# scan root if `jq` is missing or it doesn't exist (e.g. Claude Code
-# hooks were never used, or this repo doesn't share auth this way) —
-# best-effort extra, like the PR column.
+# repo that shares Claude Code's login via RUORI_SHARED_DIR (see
+# docs/container-sandbox-guide.md's "Recipe: Claude Code auth"), any
+# <ruori-state-dir>/shared/*/projects it finds too -- that immediate
+# subdirectory name (e.g. this repo's "ruori-claude-home") is a
+# per-repo Dockerfile/entrypoint convention, never ruori's to know, so
+# this globs for the *shape* (something directly under
+# RUORI_SHARED_DIR with its own projects/ folder) rather than a
+# specific name. Deliberately not */subagents/*.jsonl, nested under a
+# session: those never carry their own "cost-state" line, since their
+# cost is already rolled into the parent session's. Sums each matching
+# file's last "cost-state" line's totalCostUSD (that field is already
+# a running total for the session, so only the last one per file
+# counts) for files whose cwd matches one of this repo's worktree
+# paths. Persists via save_usage_cost_cache. Silently skips a scan root
+# if `jq` is missing or it doesn't exist (e.g. Claude Code hooks were
+# never used, or this repo doesn't share auth this way) — best-effort
+# extra, like the PR column.
 fetch_usage_costs() {
   usage_cost_map=()
   usage_cost_ever_fetched=1
   command -v jq >/dev/null 2>&1 || { save_usage_cost_cache; return 0; }
 
   local -a projects_dirs=("$HOME/.claude/projects")
-  local common_dir shared_projects_dir
-  common_dir="$(git_common_dir)" 2>/dev/null || common_dir=""
-  if [ -n "$common_dir" ]; then
-    for shared_projects_dir in "$common_dir"/*/projects; do
+  local state_dir shared_projects_dir
+  state_dir="$(ruori_state_dir)" 2>/dev/null || state_dir=""
+  if [ -n "$state_dir" ]; then
+    for shared_projects_dir in "$state_dir/shared"/*/projects; do
       [ -d "$shared_projects_dir" ] || continue
       projects_dirs+=("$shared_projects_dir")
     done
@@ -1074,13 +1089,9 @@ marker_for() {
 # whatever you'd last switched to in a previous run. Cached under the
 # repo's common git dir, like the PR/usage caches.
 current_worktree_cache_file() {
-  local common_dir
-  common_dir="$(cd "$repo_root" && git rev-parse --git-common-dir 2>/dev/null)" || return 1
-  case "$common_dir" in
-    /*) ;;
-    *) common_dir="$repo_root/$common_dir" ;;
-  esac
-  printf '%s/ruori-current-worktree' "$common_dir"
+  local state_dir
+  state_dir="$(ruori_state_dir)" || return 1
+  printf '%s/current-worktree' "$state_dir"
 }
 
 save_current_worktree() {
@@ -1480,18 +1491,21 @@ case "$cmd" in
 
     resources_section "Book-keeping"
     resources_scope "Global"
-    resources_entry "$HOME/.claude/projects" "Not ruori's own file -- Claude Code's own session-transcript log, which Claude Code writes on its own with no setup. Nothing to manage yourself. ruori only reads it, to total up USAGE for a worktree whose Claude Code runs directly on the host (not in a container); it's updated continuously by Claude Code itself while a session runs there. For a worktree in container mode this path is irrelevant -- its own transcripts live inside the container instead, unless this repo shares Claude Code's login via a RUORI_SHARED_DIR subdirectory (see docs/container-sandbox-guide.md's 'Recipe: Claude Code auth'), in which case ruori also scans <common-git-dir>/*/projects the same way; otherwise see .ruori-agent-usage under Worktree below."
+    resources_entry "$HOME/.claude/projects" "Not ruori's own file -- Claude Code's own session-transcript log, which Claude Code writes on its own with no setup. Nothing to manage yourself. ruori only reads it, to total up USAGE for a worktree whose Claude Code runs directly on the host (not in a container); it's updated continuously by Claude Code itself while a session runs there. For a worktree in container mode this path is irrelevant -- its own transcripts live inside the container instead, unless this repo shares Claude Code's login via RUORI_SHARED_DIR (see docs/container-sandbox-guide.md's 'Recipe: Claude Code auth'), in which case ruori also scans <ruori-state-dir>/shared/*/projects the same way; otherwise see .ruori/agent-usage under Worktree below."
     resources_scope "Repository"
-    resources_entry "$common_dir/ruori-current-worktree" "Internal to ruori, no need to open it. Remembers which worktree you last switched to, so the picker's * marker survives across separate 'ruori' runs. Written by ruori itself on every switch; read once on startup."
-    resources_entry "$common_dir/ruori-activation-times" "Internal to ruori, safe to delete. One line per worktree with the epoch time it was last activated, used only to sort the picker/list so your most recently used worktree sorts first. Rewritten by ruori every time you switch to a worktree."
-    resources_entry "$common_dir/ruori-pr-status.cache" "Internal to ruori; delete it any time to force a re-fetch. Caches each branch's GitHub PR status so the picker doesn't call 'gh' on every reload. Written only by a Ctrl-F fetch in the picker, or by 'ruori list'/'ruori details' (which always fetch fresh); read on every other picker reload."
-    resources_entry "$common_dir/ruori-usage-cost.cache" "Internal to ruori; delete it any time to force a re-fetch. Caches each worktree's total Claude Code spend (sourced from ~/.claude/projects or .ruori-agent-usage -- see both above/below) so the picker doesn't rescan your whole Claude Code history on every reload. Written by the same Ctrl-F / 'list' / 'details' fetches as the PR cache above."
-    resources_entry "$common_dir/ruori-ports" "Internal to ruori; only matters in container mode. A worktree's host port is only seeded by a hash of it -- ruori then scans forward from that seed for the first port that's actually free, so the final pick depends on ambient state (what else is running) at that moment, not the hash alone. Docker bakes that exact port into the container permanently at creation and won't let it change without recreating the container, so ruori has to remember what it picked here rather than recomputing it later and risking a different answer. Written when a container-mode worktree's container first starts; its entries are dropped when that worktree is removed ('ruori rm')."
-    resources_entry "$common_dir/ruori-iterm.log" "Debug-only -- you don't need to read this unless an iTerm2 window is misbehaving (see docs/troubleshooting.md). An append-only log of the manager loop's own iTerm2 window open/close lifecycle. Written continuously by ruori for as long as the manager loop ('ruori' with no args) keeps running."
-    resources_entry "$common_dir/ruori-iterm-window" "Internal to ruori. Tracks the single iTerm2 window id the manager loop currently owns, so switching worktrees closes the right window before opening a new one instead of leaking windows behind. Written by ruori every time it opens or closes that window; only meaningful while the manager loop is running."
+    resources_entry "$common_dir/ruori" "Everything ruori itself keeps for this repo lives under this one directory -- delete it any time ('rm -rf') to reset all local ruori state for this repo in one shot; every entry below is a file or subdirectory inside it. ruori recreates whatever it needs (this directory included) on its next invocation."
+    resources_entry "$common_dir/ruori/current-worktree" "Internal to ruori, no need to open it. Remembers which worktree you last switched to, so the picker's * marker survives across separate 'ruori' runs. Written by ruori itself on every switch; read once on startup."
+    resources_entry "$common_dir/ruori/activation-times" "Internal to ruori, safe to delete. One line per worktree with the epoch time it was last activated, used only to sort the picker/list so your most recently used worktree sorts first. Rewritten by ruori every time you switch to a worktree."
+    resources_entry "$common_dir/ruori/pr-status.cache" "Internal to ruori; delete it any time to force a re-fetch. Caches each branch's GitHub PR status so the picker doesn't call 'gh' on every reload. Written only by a Ctrl-F fetch in the picker, or by 'ruori list'/'ruori details' (which always fetch fresh); read on every other picker reload."
+    resources_entry "$common_dir/ruori/usage-cost.cache" "Internal to ruori; delete it any time to force a re-fetch. Caches each worktree's total Claude Code spend (sourced from ~/.claude/projects, RUORI_SHARED_DIR, or .ruori/agent-usage -- see both above/below) so the picker doesn't rescan your whole Claude Code history on every reload. Written by the same Ctrl-F / 'list' / 'details' fetches as the PR cache above."
+    resources_entry "$common_dir/ruori/ports" "Internal to ruori; only matters in container mode. A worktree's host port is only seeded by a hash of it -- ruori then scans forward from that seed for the first port that's actually free, so the final pick depends on ambient state (what else is running) at that moment, not the hash alone. Docker bakes that exact port into the container permanently at creation and won't let it change without recreating the container, so ruori has to remember what it picked here rather than recomputing it later and risking a different answer. Written when a container-mode worktree's container first starts; its entries are dropped when that worktree is removed ('ruori rm')."
+    resources_entry "$common_dir/ruori/iterm.log" "Debug-only -- you don't need to read this unless an iTerm2 window is misbehaving (see docs/troubleshooting.md). An append-only log of the manager loop's own iTerm2 window open/close lifecycle. Written continuously by ruori for as long as the manager loop ('ruori' with no args) keeps running."
+    resources_entry "$common_dir/ruori/iterm-window" "Internal to ruori. Tracks the single iTerm2 window id the manager loop currently owns, so switching worktrees closes the right window before opening a new one instead of leaking windows behind. Written by ruori every time it opens or closes that window; only meaningful while the manager loop is running."
+    resources_entry "$common_dir/ruori/shared" "This is RUORI_SHARED_DIR (see the 'Managed resources' section below) -- only present if container mode is on. ruori itself never writes anything under it; whatever's there was put there by this repo's own Dockerfile/entrypoint (e.g. 'ruori-claude-home', if this repo shares Claude Code's login -- see docs/container-sandbox-guide.md's 'Recipe: Claude Code auth')."
     resources_scope "Worktree"
-    resources_entry "$worktree_path/$CLAUDE_STATUS_FILENAME" "You don't write this, but it's worth knowing about: it's what makes the picker's CLAUDE (busy/waiting/idle) column work for this worktree. Written by Claude Code's own hooks -- baked into this repo's container image by the setup skill 'ruori init' installs, never by ruori itself -- every time Claude's status changes. Only present/updated if this worktree runs in container mode. Gitignored: make sure your **global** gitignore excludes it, or 'git worktree remove' will refuse to remove this worktree."
-    resources_entry "$worktree_path/$AGENT_USAGE_FILENAME" "Same story as the status file above: not written by ruori, and takes priority over the host-side scan when present and fresh (see Global above) -- the working source of the USAGE number for a worktree running in a container that does NOT share Claude Code's login via RUORI_SHARED_DIR (its own ~/.claude/projects isn't visible to the host otherwise). Written by that same container-baked Claude Code hook each time Claude goes idle, as a running total, if that hook computes one -- this repo's own hook doesn't (see docs/container-sandbox-guide.md's 'Recipe: Claude Code auth'), relying on the host-side scan instead. Also needs the global-gitignore entry mentioned above."
+    resources_entry "$worktree_path/.ruori" "Everything an external agent hook writes at this worktree's root lives under this one directory -- not written by ruori itself, but ruori only ever reads the two well-known files below from it. Needs a **global** gitignore entry (not a per-repo one), or 'git worktree remove' will refuse to remove this worktree."
+    resources_entry "$worktree_path/$CLAUDE_STATUS_FILENAME" "You don't write this, but it's worth knowing about: it's what makes the picker's CLAUDE (busy/waiting/idle) column work for this worktree. Written by Claude Code's own hooks -- baked into this repo's container image by the setup skill 'ruori init' installs, never by ruori itself -- every time Claude's status changes. Only present/updated if this worktree runs in container mode."
+    resources_entry "$worktree_path/$AGENT_USAGE_FILENAME" "Same story as the status file above: not written by ruori, and takes priority over the host-side scan when present and fresh (see Global above) -- the working source of the USAGE number for a worktree running in a container that does NOT share Claude Code's login via RUORI_SHARED_DIR (its own ~/.claude/projects isn't visible to the host otherwise). Written by that same container-baked Claude Code hook each time Claude goes idle, as a running total, if that hook computes one -- this repo's own hook doesn't (see docs/container-sandbox-guide.md's 'Recipe: Claude Code auth'), relying on the host-side scan instead."
 
     resources_section "Configuration"
     resources_scope "Global"
@@ -1517,7 +1531,7 @@ case "$cmd" in
     resources_entry "$worktree_session" "Not a file, though 'tmux attach -t $worktree_session' works if you want to look. ruori creates this tmux session (or reuses it if already running) the moment you switch to this worktree; it keeps running in the background after you switch away, until 'ruori rm'/Ctrl-D kills it."
     if container_mode_enabled; then
       resources_entry "$worktree_session" "This worktree's Docker container -- same name as its tmux session above. Created by ruori the first time you switch to this worktree; stopped (not removed) when its tmux session is killed, and only actually removed by 'ruori rm'."
-      resources_entry "(recorded in $common_dir/ruori-ports, once allocated)" "Not something you manage directly -- see 'ruori ports' for this worktree's live host-port mapping, if its container has started at least once. Allocated by ruori the first time this worktree's container starts, and freed when the worktree is removed."
+      resources_entry "(recorded in $common_dir/ruori/ports, once allocated)" "Not something you manage directly -- see 'ruori ports' for this worktree's live host-port mapping, if its container has started at least once. Allocated by ruori the first time this worktree's container starts, and freed when the worktree is removed."
     fi
     exit 0
     ;;
@@ -1687,13 +1701,9 @@ active_iterm_window_id=""
 # cleared automatically — see README "Troubleshooting: leftover iTerm2
 # windows" for how to read/clear it.
 iterm_log_file() {
-  local common_dir
-  common_dir="$(cd "$repo_root" && git rev-parse --git-common-dir 2>/dev/null)" || return 1
-  case "$common_dir" in
-    /*) ;;
-    *) common_dir="$repo_root/$common_dir" ;;
-  esac
-  printf '%s/ruori-iterm.log' "$common_dir"
+  local state_dir
+  state_dir="$(ruori_state_dir)" || return 1
+  printf '%s/iterm.log' "$state_dir"
 }
 
 log_iterm() {
@@ -1716,13 +1726,9 @@ iterm_window_ids() {
 # was open: the fresh process started with no id, skipped the close on
 # the next switch, and left two worktree windows on screen.
 iterm_window_state_file() {
-  local common_dir
-  common_dir="$(cd "$repo_root" && git rev-parse --git-common-dir 2>/dev/null)" || return 1
-  case "$common_dir" in
-    /*) ;;
-    *) common_dir="$repo_root/$common_dir" ;;
-  esac
-  printf '%s/ruori-iterm-window' "$common_dir"
+  local state_dir
+  state_dir="$(ruori_state_dir)" || return 1
+  printf '%s/iterm-window' "$state_dir"
 }
 
 # iTerm2's current pid, or empty if it isn't running. Recorded alongside

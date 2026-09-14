@@ -55,7 +55,7 @@ and how it's computed.
 The row marked `*` is whichever worktree you last switched to —
 starting from the main worktree, by default, on a repo with no `ruori`
 history yet. This is persisted on disk
-(`<git-common-dir>/ruori-current-worktree`), so it carries over across
+(`<git-common-dir>/ruori/current-worktree`), so it carries over across
 separate runs of `ruori`. If that worktree gets deleted (`ruori rm`/Ctrl-D)
 it falls back to the main worktree. Distinct from `TMUX` = `active`,
 which just means a tmux session happens to be running there.
