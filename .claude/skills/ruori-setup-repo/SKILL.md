@@ -1,3 +1,8 @@
+---
+name: ruori-setup-repo
+description: 'Set up ruori for this repo: write .ruori.conf and a container-mode Dockerfile, with the Claude Code busy/waiting/idle status hook baked into the image itself, never into host Claude Code config. Trigger phrases: set up ruori, ruori init, configure ruori for this repo, ruori-setup-repo.'
+---
+
 # Setting up `ruori` config for a new repo — instructions for an AI agent
 
 You are being asked to create the config `ruori` (a
@@ -143,10 +148,7 @@ mode at all:
   installed.
 - How the dev server is started, and which port(s) it listens on.
 - Whether any host credentials need `container-copy`ing in (and their
-  exact host path) — e.g. an agent's own credentials file, or GitHub
-  CLI auth (`~/.config/gh/hosts.yml`, or a per-identity `GH_CONFIG_DIR`
-  if the user keeps separate work/personal `gh` logins — see the
-  "GitHub CLI auth" recipe in the container sandbox guide). Only ever
+  exact host path) — e.g. an agent's own credentials file. Only ever
   copy what the user explicitly names; never propose copying something
   by default.
 - **Whether the project depends on other backing services** (a
