@@ -1076,24 +1076,75 @@ fetch_usage_costs() {
     wanted_paths["$p"]=1
   done
 
-  local projects_dir f cwd cost
+  # Claude Code names each ~/.claude/projects subdirectory after the
+  # cwd its sessions ran in, with every non-alphanumeric character
+  # replaced by '-' (e.g. "/Users/me/git/foo" -> "-Users-me-git-foo").
+  # This is a *forward* encoding of a cwd we already know (this repo's
+  # own worktree paths) — not an attempt to invert an unknown one — so
+  # it's safe to use as an exact-match pre-filter: skip a whole
+  # directory, and every session transcript inside it, without opening
+  # a single file, if its name can't possibly belong to one of this
+  # repo's worktrees. On a machine with many repos this is the
+  # difference between reading a handful of files and reading every
+  # session transcript ever recorded, host-wide, on every `ruori
+  # list`/`details`/Ctrl-F fetch.
+  local -A wanted_dir_names=()
+  for p in "${paths[@]}"; do
+    wanted_dir_names["$(printf '%s' "$p" | tr -c 'A-Za-z0-9' '-')"]=1
+  done
+
+  local projects_dir f cwd cost dir_name project_subdir
+
+  # Reads $1 (a session transcript jsonl file) and, if its recorded cwd
+  # is one of this repo's worktree paths, adds its last cost-state
+  # total into usage_cost_map. A local function (bash's dynamic scoping
+  # means it sees wanted_paths/usage_cost_map from the enclosing call)
+  # so both scan shapes below — filtered and unfiltered — share one
+  # implementation.
+  scan_usage_cost_file() {
+    local f="$1"
+    log_file_read "$f"
+    # Both greps legitimately return 1 (no match) for plenty of files —
+    # e.g. a session with no recorded cwd, or one that ended before any
+    # cost-state checkpoint was written — and pipefail would otherwise
+    # turn that into a script-ending failure via `set -e` on the
+    # assignment itself, before the `[ -n ... ] || continue` below even
+    # runs.
+    cwd="$(grep -m1 '"cwd":"' "$f" 2>/dev/null | jq -r '.cwd // empty' 2>/dev/null)" || true
+    [ -n "$cwd" ] || return 0
+    [ -n "${wanted_paths[$cwd]:-}" ] || return 0
+    cost="$(grep '"type":"cost-state"' "$f" 2>/dev/null | tail -1 | jq -r '.totalCostUSD // empty' 2>/dev/null)" || true
+    [ -n "$cost" ] || return 0
+    usage_cost_map["$cwd"]="$(printf '%s\n%s\n' "${usage_cost_map[$cwd]:-0}" "$cost" | jq -s 'add')"
+  }
+
   for projects_dir in "${projects_dirs[@]}"; do
     [ -d "$projects_dir" ] || continue
+    if [ "$projects_dir" = "$HOME/.claude/projects" ]; then
+      # The directory-name pre-filter only applies here: a host-mode
+      # session's recorded cwd is guaranteed to be the worktree path it
+      # ran in (see activate_worktree's `tmux new-session -c
+      # "$target_path"`). A container-mode session's cwd is NOT
+      # guaranteed to equal the host worktree path it's bind-mounted at
+      # — e.g. a Dockerfile whose entrypoint runs Claude Code from a
+      # fixed WORKDIR instead of cd-ing into the mount — so applying
+      # this same shortcut to the RUORI_SHARED_DIR scan below would
+      # risk silently skipping real matches; that one still scans every
+      # file, same as before.
+      for project_subdir in "$projects_dir"/*/; do
+        [ -d "$project_subdir" ] || continue
+        dir_name="$(basename "$project_subdir")"
+        [ -n "${wanted_dir_names[$dir_name]:-}" ] || continue
+        for f in "$project_subdir"*.jsonl; do
+          [ -f "$f" ] || continue
+          scan_usage_cost_file "$f"
+        done
+      done
+      continue
+    fi
     for f in "$projects_dir"/*/*.jsonl; do
       [ -f "$f" ] || continue
-      log_file_read "$f"
-      # Both greps legitimately return 1 (no match) for plenty of files —
-      # e.g. a session with no recorded cwd, or one that ended before any
-      # cost-state checkpoint was written — and pipefail would otherwise
-      # turn that into a script-ending failure via `set -e` on the
-      # assignment itself, before the `[ -n ... ] || continue` below even
-      # runs.
-      cwd="$(grep -m1 '"cwd":"' "$f" 2>/dev/null | jq -r '.cwd // empty' 2>/dev/null)" || true
-      [ -n "$cwd" ] || continue
-      [ -n "${wanted_paths[$cwd]:-}" ] || continue
-      cost="$(grep '"type":"cost-state"' "$f" 2>/dev/null | tail -1 | jq -r '.totalCostUSD // empty' 2>/dev/null)" || true
-      [ -n "$cost" ] || continue
-      usage_cost_map["$cwd"]="$(printf '%s\n%s\n' "${usage_cost_map[$cwd]:-0}" "$cost" | jq -s 'add')"
+      scan_usage_cost_file "$f"
     done
   done
 
