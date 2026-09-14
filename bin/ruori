@@ -97,6 +97,37 @@ sanitize() {
   printf '%s' "$1" | tr -c 'A-Za-z0-9_-' '-'
 }
 
+# --- file I/O logging (docs/troubleshooting.md) ---
+# Every read/write ruori's own code performs against a file — state/cache
+# files, .ruori.conf, a worktree copy-in, a generated Dockerfile-adjacent
+# file — is recorded here, append-only, for troubleshooting/transparency:
+# same convention as iterm.log below (never rotated; see that comment for
+# why), and for the same reason — by the time you notice a config file
+# didn't get copied or a cache looks stale, whatever ruori actually did is
+# otherwise gone. Scope: only file I/O ruori's own script code performs
+# directly (a read/cat/redirect/cp/mv it runs). File access performed
+# *inside* a child process it shells out to (git, docker, code, fzf,
+# osascript) isn't observable from here without OS-level tracing, so
+# those aren't logged. Writes to this log file itself are excluded too,
+# to avoid unbounded self-referential growth.
+fileio_log_file() {
+  local state_dir
+  state_dir="$(ruori_state_dir)" || return 1
+  printf '%s/file-io.log' "$state_dir"
+}
+
+log_file_read() {
+  local f
+  f="$(fileio_log_file)" || return 0
+  printf '%s READ  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >>"$f" 2>/dev/null || true
+}
+
+log_file_write() {
+  local f
+  f="$(fileio_log_file)" || return 0
+  printf '%s WRITE %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >>"$f" 2>/dev/null || true
+}
+
 # Cache file recording, per worktree path, the epoch time it was last
 # activated (switched to — see save_activation_time, called from the
 # manager loop below). Drives sort_worktrees_by_activation, which the
@@ -117,6 +148,7 @@ load_activation_times() {
   local cache_file epoch path
   cache_file="$(activation_times_cache_file)" || return 0
   [ -f "$cache_file" ] || return 0
+  log_file_read "$cache_file"
   while IFS=$'\t' read -r epoch path; do
     [ -n "$path" ] || continue
     activation_time_for_path["$path"]="$epoch"
@@ -135,6 +167,7 @@ save_activation_time() {
   for p in "${!activation_time_for_path[@]}"; do
     printf '%s\t%s\n' "${activation_time_for_path[$p]}" "$p"
   done >"$tmp"
+  log_file_write "$cache_file"
   mv "$tmp" "$cache_file"
 }
 
@@ -268,6 +301,7 @@ CONFIG_FILENAME=".ruori.conf"
 config_directives() {
   local config_file="$main_worktree_path/$CONFIG_FILENAME"
   [ -f "$config_file" ] || return 0
+  log_file_read "$config_file"
   local line key value
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%%#*}"
@@ -416,6 +450,8 @@ sync_env_files() {
       target_file="$target_path/$rel"
       if [ ! -e "$target_file" ]; then
         mkdir -p "$(dirname "$target_file")"
+        log_file_read "$f"
+        log_file_write "$target_file"
         cp "$f" "$target_file"
         echo "ruori: copied $rel into worktree"
       fi
@@ -509,6 +545,7 @@ container_ports_info_for() {
   local session="$1" cache_file s cp hp parts=()
   cache_file="$(ports_cache_file)" || { echo "-"; return; }
   [ -f "$cache_file" ] || { echo "-"; return; }
+  log_file_read "$cache_file"
   while IFS=$'\t' read -r s cp hp; do
     [ "$s" = "$session" ] || continue
     parts+=("${hp}->${cp}")
@@ -589,6 +626,7 @@ allocate_port_for() {
   cache_file="$(ports_cache_file)" || return 1
 
   if [ -f "$cache_file" ]; then
+    log_file_read "$cache_file"
     while IFS=$'\t' read -r s cp hp; do
       if [ "$s" = "$session" ] && [ "$cp" = "$container_port" ]; then
         printf '%s' "$hp"
@@ -599,6 +637,7 @@ allocate_port_for() {
 
   local -A used_host_ports=()
   if [ -f "$cache_file" ]; then
+    log_file_read "$cache_file"
     while IFS=$'\t' read -r s cp hp; do
       [ -n "$hp" ] && used_host_ports["$hp"]=1
     done <"$cache_file"
@@ -609,6 +648,7 @@ allocate_port_for() {
     candidate=$((candidate + 1))
   done
 
+  log_file_write "$cache_file"
   printf '%s\t%s\t%s\n' "$session" "$container_port" "$candidate" >>"$cache_file"
   printf '%s' "$candidate"
 }
@@ -621,7 +661,9 @@ release_ports_for() {
   cache_file="$(ports_cache_file)" || return 0
   [ -f "$cache_file" ] || return 0
   tmp="$(mktemp -t ruori-ports)"
+  log_file_read "$cache_file"
   grep -v "^${session}	" "$cache_file" >"$tmp" 2>/dev/null || true
+  log_file_write "$cache_file"
   mv "$tmp" "$cache_file"
 }
 
@@ -766,7 +808,12 @@ AGENT_USAGE_STALE_SECS=$((30 * 24 * 60 * 60))
 claude_status_for() {
   local path="$1" f
   f="$path/$CLAUDE_STATUS_FILENAME"
-  [ -f "$f" ] && head -n1 "$f" || echo "-"
+  if [ -f "$f" ]; then
+    log_file_read "$f"
+    head -n1 "$f"
+  else
+    echo "-"
+  fi
 }
 
 # Maps branch name -> PR status string. Populated either from the on-disk
@@ -801,6 +848,7 @@ pr_status_cache_file() {
 save_pr_status_cache() {
   local cache_file branch
   cache_file="$(pr_status_cache_file)" || return 0
+  log_file_write "$cache_file"
   : >"$cache_file"
   for branch in "${!pr_status_map[@]}"; do
     printf '%s\t%s\n' "$branch" "${pr_status_map[$branch]}" >>"$cache_file"
@@ -818,6 +866,7 @@ load_pr_status_cache() {
   cache_file="$(pr_status_cache_file)" || return 0
   [ -f "$cache_file" ] || return 0
   pr_status_ever_fetched=1
+  log_file_read "$cache_file"
   while IFS=$'\t' read -r branch status; do
     [ -n "$branch" ] || continue
     pr_status_map["$branch"]="$status"
@@ -961,6 +1010,7 @@ usage_cost_cache_file() {
 save_usage_cost_cache() {
   local cache_file path
   cache_file="$(usage_cost_cache_file)" || return 0
+  log_file_write "$cache_file"
   : >"$cache_file"
   for path in "${!usage_cost_map[@]}"; do
     printf '%s\t%s\n' "$path" "${usage_cost_map[$path]}" >>"$cache_file"
@@ -977,6 +1027,7 @@ load_usage_cost_cache() {
   cache_file="$(usage_cost_cache_file)" || return 0
   [ -f "$cache_file" ] || return 0
   usage_cost_ever_fetched=1
+  log_file_read "$cache_file"
   while IFS=$'\t' read -r path cost; do
     [ -n "$path" ] || continue
     usage_cost_map["$path"]="$cost"
@@ -1030,6 +1081,7 @@ fetch_usage_costs() {
     [ -d "$projects_dir" ] || continue
     for f in "$projects_dir"/*/*.jsonl; do
       [ -f "$f" ] || continue
+      log_file_read "$f"
       # Both greps legitimately return 1 (no match) for plenty of files —
       # e.g. a session with no recorded cwd, or one that ended before any
       # cost-state checkpoint was written — and pipefail would otherwise
@@ -1052,6 +1104,7 @@ usage_cost_for() {
   local path="$1" cost f agent_cost agent_epoch now
   f="$path/$AGENT_USAGE_FILENAME"
   if [ -f "$f" ]; then
+    log_file_read "$f"
     agent_cost="$(sed -n '1p' "$f" 2>/dev/null)"
     agent_epoch="$(sed -n '2p' "$f" 2>/dev/null)"
     now="$(date +%s)"
@@ -1097,6 +1150,7 @@ current_worktree_cache_file() {
 save_current_worktree() {
   local cache_file
   cache_file="$(current_worktree_cache_file)" || return 0
+  log_file_write "$cache_file"
   printf '%s\n' "$current_worktree_path" >"$cache_file"
 }
 
@@ -1108,6 +1162,7 @@ load_current_worktree() {
   local cache_file persisted p
   cache_file="$(current_worktree_cache_file)" || return 0
   [ -f "$cache_file" ] || return 0
+  log_file_read "$cache_file"
   persisted="$(head -n1 "$cache_file")"
   [ -n "$persisted" ] || return 0
   for p in "${paths[@]}"; do
@@ -1235,8 +1290,10 @@ delete_worktree() {
 
   local rm_err
   rm_err="$(mktemp -t ruori-rm-err)"
+  log_file_write "$rm_err"
   if ! git -C "$repo_root" worktree remove "$path" 2>"$rm_err"; then
     echo "ruori: git worktree remove failed:" >&2
+    log_file_read "$rm_err"
     sed 's/^/  /' "$rm_err" >&2
     rm -f "$rm_err"
     read -r -p "Force removal? This discards any uncommitted/untracked changes in that worktree. [y/N] " confirm
@@ -1273,7 +1330,9 @@ delete_worktree() {
   local cache_file tmp_cache
   cache_file="$(pr_status_cache_file)" && [ -f "$cache_file" ] && {
     tmp_cache="$(mktemp -t ruori-pr-cache)"
+    log_file_read "$cache_file"
     grep -v "^${branch}	" "$cache_file" >"$tmp_cache" 2>/dev/null || true
+    log_file_write "$cache_file"
     mv "$tmp_cache" "$cache_file"
   }
 
@@ -1382,6 +1441,8 @@ case "$cmd" in
 
     skill_dir="$repo_root/.claude/skills/ruori-setup-repo"
     mkdir -p "$skill_dir"
+    log_file_read "$guide_src"
+    log_file_write "$skill_dir/SKILL.md"
     {
       printf '%s\n' '---'
       printf '%s\n' 'name: ruori-setup-repo'
@@ -1419,6 +1480,7 @@ case "$cmd" in
     printf "%-30s %-8s %-8s %-40s %s\n" "BRANCH" "CPORT" "HPORT" "SESSION" "PATH"
     ports_file="$(ports_cache_file 2>/dev/null || true)"
     if [ -n "$ports_file" ] && [ -f "$ports_file" ]; then
+      log_file_read "$ports_file"
       while IFS=$'\t' read -r row_session row_cport row_hport; do
         [ -n "$row_session" ] || continue
         for i in "${!paths[@]}"; do
@@ -1500,6 +1562,7 @@ case "$cmd" in
     resources_entry "$common_dir/ruori/usage-cost.cache" "Internal to ruori; delete it any time to force a re-fetch. Caches each worktree's total Claude Code spend (sourced from ~/.claude/projects, RUORI_SHARED_DIR, or .ruori/agent-usage -- see both above/below) so the picker doesn't rescan your whole Claude Code history on every reload. Written by the same Ctrl-F / 'list' / 'details' fetches as the PR cache above."
     resources_entry "$common_dir/ruori/ports" "Internal to ruori; only matters in container mode. A worktree's host port is only seeded by a hash of it -- ruori then scans forward from that seed for the first port that's actually free, so the final pick depends on ambient state (what else is running) at that moment, not the hash alone. Docker bakes that exact port into the container permanently at creation and won't let it change without recreating the container, so ruori has to remember what it picked here rather than recomputing it later and risking a different answer. Written when a container-mode worktree's container first starts; its entries are dropped when that worktree is removed ('ruori rm')."
     resources_entry "$common_dir/ruori/iterm.log" "Debug-only -- you don't need to read this unless an iTerm2 window is misbehaving (see docs/troubleshooting.md). An append-only log of the manager loop's own iTerm2 window open/close lifecycle. Written continuously by ruori for as long as the manager loop ('ruori' with no args) keeps running."
+    resources_entry "$common_dir/ruori/file-io.log" "Debug-only -- for troubleshooting/transparency (see docs/troubleshooting.md). An append-only log of every read/write ruori's own script code performs against a file (state/cache files, $CONFIG_FILENAME, worktree copy-in, generated files) -- not file access done inside a child process it shells out to (git, docker, code, fzf, osascript), which isn't observable here. Written by every ruori command that touches a file, including read-only ones like 'list'."
     resources_entry "$common_dir/ruori/iterm-window" "Internal to ruori. Tracks the single iTerm2 window id the manager loop currently owns, so switching worktrees closes the right window before opening a new one instead of leaking windows behind. Written by ruori every time it opens or closes that window; only meaningful while the manager loop is running."
     resources_entry "$common_dir/ruori/shared" "This is RUORI_SHARED_DIR (see the 'Managed resources' section below) -- only present if container mode is on. ruori itself never writes anything under it; whatever's there was put there by this repo's own Dockerfile/entrypoint (e.g. 'ruori-claude-home', if this repo shares Claude Code's login -- see docs/container-sandbox-guide.md's 'Recipe: Claude Code auth')."
     resources_scope "Worktree"
@@ -1709,6 +1772,7 @@ iterm_log_file() {
 log_iterm() {
   local f
   f="$(iterm_log_file)" || return 0
+  log_file_write "$f"
   printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >>"$f" 2>/dev/null || true
 }
 
@@ -1745,6 +1809,7 @@ save_active_iterm_window_id() {
   local f
   f="$(iterm_window_state_file)" || return 0
   if [ -n "$active_iterm_window_id" ]; then
+    log_file_write "$f"
     printf '%s\t%s\n' "$(iterm_pid)" "$active_iterm_window_id" >"$f" 2>/dev/null || true
   else
     rm -f "$f" 2>/dev/null || true
@@ -1761,6 +1826,7 @@ load_active_iterm_window_id() {
   active_iterm_window_id=""
   f="$(iterm_window_state_file)" || return 0
   [ -f "$f" ] || return 0
+  log_file_read "$f"
   IFS=$'\t' read -r saved_pid saved_id <"$f" || return 0
   [ -n "$saved_id" ] || return 0
   now_pid="$(iterm_pid)"
@@ -1852,6 +1918,7 @@ open_iterm_window_for() {
   fi
 
   script_path="$(mktemp -t ruori-attach)"
+  log_file_write "$script_path"
   cat >"$script_path" <<SCRIPT
 #!/bin/bash
 # iTerm2 otherwise titles the window after the foreground job (e.g.

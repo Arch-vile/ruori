@@ -36,3 +36,28 @@ numbers windows from a counter that resets with the app, so an id from
 a previous run can name an unrelated window, and `ruori` would rather
 leave a stray window for you to close than close the wrong one. Both
 non-adoptions are logged.
+
+## File I/O log
+
+Every read/write `ruori`'s own script code performs against a file —
+`.ruori.conf`, its state/cache files under `ruori/`, a worktree
+copy-in, a generated file like the `ruori init` skill — is logged,
+append-only, to `<git-common-dir>/ruori/file-io.log`, one
+`<timestamp> READ|WRITE <path>` line per operation. This exists for
+the same reason as `iterm.log` above: if a `copy` pattern didn't pick
+up a file, or a cache looks stale, or you just want to know what
+`ruori` actually touched on a given run, this log is the record —
+rather than having to infer it from source. Like `iterm.log`, it's
+never rotated or cleared automatically; delete it yourself if it grows
+large (a `ruori list`/`details`/Ctrl-F usage-cost fetch that scans your
+whole `~/.claude/projects` history logs one `READ` line per session
+transcript file it opens, which can add up on a heavy user's machine).
+
+Scope: only file I/O `ruori`'s own script code performs directly (a
+`cat`/redirect/`cp`/`mv` it runs). File access performed *inside* a
+child process it shells out to — `git`, `docker`, `code`, `fzf`,
+`osascript` — isn't observable from bash without OS-level tracing
+(`strace`/`dtrace`), so none of that is in this log; e.g. `git worktree
+list --porcelain`'s own reads of `.git` internals never appear here,
+only `ruori`'s own reads/writes of files like `.ruori.conf` or the
+`ruori/` state files do.
