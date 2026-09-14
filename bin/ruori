@@ -660,7 +660,17 @@ container_start_if_needed() {
       # exist in the image -- unlike `cp -T`, it never creates missing
       # intermediate directories on the destination side.
       docker exec "$name" mkdir -p "$(dirname "$container_path")"
-      docker cp "$host_path" "$name:$container_path"
+      if [ -d "$host_path" ]; then
+        # A bare directory SRC_PATH nests itself inside an existing
+        # DST_PATH directory (docker cp's default "copy the directory
+        # into" behavior) instead of landing its *contents* at
+        # container_path as the "<host-path>:<container-path>" directive
+        # promises. The trailing "/." tells docker cp to copy the
+        # source directory's contents, not the directory itself.
+        docker cp "$host_path/." "$name:$container_path"
+      else
+        docker cp "$host_path" "$name:$container_path"
+      fi
     else
       echo "ruori: container-copy: host path not found, skipping: $host_path" >&2
     fi
