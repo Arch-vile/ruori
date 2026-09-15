@@ -1187,6 +1187,17 @@ marker_for() {
   [ "$1" = "$current_worktree_path" ] && printf '*' || printf ' '
 }
 
+# Marks that the user has explicitly said host mode is fine for this
+# repo, via `ruori --host-mode-fine` (see the flag-stripping code before
+# command dispatch below). Repo-scoped, not per-worktree -- same as
+# CONTAINER_MODE itself, container mode is opt-in per repo -- so
+# acknowledging once silences the nudge for every worktree of this repo.
+host_mode_ack_file() {
+  local state_dir
+  state_dir="$(ruori_state_dir)" || return 1
+  printf '%s/host-mode-ack' "$state_dir"
+}
+
 # Persists current_worktree_path across separate runs of `ruori` — without
 # this, a brand-new process always defaults back to the main worktree
 # (see the "must be run from the main worktree" check above), forgetting
@@ -1452,6 +1463,31 @@ CONTAINER_MODE=0
 container_mode_enabled && CONTAINER_MODE=1
 [ "$CONTAINER_MODE" = "1" ] && require_docker_if_container_mode
 
+# --host-mode-fine: a one-time, per-repo way to permanently silence the
+# "container mode is off" nudge further below, for a user who's
+# deliberately decided host mode is fine for this repo. Not a normal
+# subcommand -- it can appear anywhere in the arguments to any other
+# command ('ruori --host-mode-fine', 'ruori new foo --host-mode-fine',
+# ...) -- so it's stripped out of the positional params here, before
+# `cmd` is ever read, rather than added as another case branch below.
+host_mode_ack_requested=0
+host_mode_fine_args=()
+for host_mode_fine_arg in "$@"; do
+  if [ "$host_mode_fine_arg" = "--host-mode-fine" ]; then
+    host_mode_ack_requested=1
+  else
+    host_mode_fine_args+=("$host_mode_fine_arg")
+  fi
+done
+set -- "${host_mode_fine_args[@]}"
+if [ "$host_mode_ack_requested" = "1" ]; then
+  host_mode_ack_file_path="$(host_mode_ack_file)" || host_mode_ack_file_path=""
+  if [ -n "$host_mode_ack_file_path" ]; then
+    log_file_write "$host_mode_ack_file_path"
+    date '+%Y-%m-%d %H:%M:%S' >"$host_mode_ack_file_path"
+  fi
+fi
+
 load_current_worktree
 
 cmd="${1:-switch}"
@@ -1608,6 +1644,7 @@ case "$cmd" in
     resources_scope "Repository"
     resources_entry "$common_dir/ruori" "Everything ruori itself keeps for this repo lives under this one directory -- delete it any time ('rm -rf') to reset all local ruori state for this repo in one shot; every entry below is a file or subdirectory inside it. ruori recreates whatever it needs (this directory included) on its next invocation."
     resources_entry "$common_dir/ruori/current-worktree" "Internal to ruori, no need to open it. Remembers which worktree you last switched to, so the picker's * marker survives across separate 'ruori' runs. Written by ruori itself on every switch; read once on startup."
+    resources_entry "$common_dir/ruori/host-mode-ack" "Internal to ruori, safe to delete to bring the blocking nudge back. Marks that you've acknowledged (via 'ruori --host-mode-fine') that host mode is fine for this repo, downgrading the 'container mode is OFF' prompt before the manager loop starts to a one-line reminder printed every run instead of something you press Enter past. Only relevant when container mode isn't on for this repo; written once by that flag, checked on every 'switch'/'new'."
     resources_entry "$common_dir/ruori/activation-times" "Internal to ruori, safe to delete. One line per worktree with the epoch time it was last activated, used only to sort the picker/list so your most recently used worktree sorts first. Rewritten by ruori every time you switch to a worktree."
     resources_entry "$common_dir/ruori/pr-status.cache" "Internal to ruori; delete it any time to force a re-fetch. Caches each branch's GitHub PR status so the picker doesn't call 'gh' on every reload. Written only by a Ctrl-F fetch in the picker, or by 'ruori list'/'ruori details' (which always fetch fresh); read on every other picker reload."
     resources_entry "$common_dir/ruori/usage-cost.cache" "Internal to ruori; delete it any time to force a re-fetch. Caches each worktree's total Claude Code spend (sourced from ~/.claude/projects, RUORI_SHARED_DIR, or .ruori/agent-usage -- see both above/below) so the picker doesn't rescan your whole Claude Code history on every reload. Written by the same Ctrl-F / 'list' / 'details' fetches as the PR cache above."
@@ -1803,15 +1840,27 @@ esac
 # Container mode is opt-in (see CONTAINER_MODE above) and strongly
 # recommended: host mode runs the tmux session -- and whatever agent it's
 # running with permission checks off -- directly on the host, able to touch
-# anything the host user account can. This is a per-run nudge, not a gate:
-# it always falls through to host mode on Enter, same as today. Only shown
+# anything the host user account can. This is a per-run notice, not a
+# gate: it always falls through to host mode, same as today. Only shown
 # on the interactive paths that reach the manager loop below ('switch'/
 # 'new'); one-shot commands (list/ports/rm/details/resources) exit inside
-# the case block above and never see it.
+# the case block above and never see it. Once `ruori --host-mode-fine`
+# has acknowledged it for this repo (see host_mode_ack_file above and the
+# flag-stripping code before command dispatch), this downgrades from a
+# blocking prompt to a one-line reminder printed every run -- still
+# visible so it's never silently forgotten which mode a repo is in, but
+# no longer something you have to press Enter past each time.
+host_mode_ack_file_path="$(host_mode_ack_file 2>/dev/null)" || host_mode_ack_file_path=""
 if [ "$CONTAINER_MODE" != "1" ]; then
-  echo "ruori: container mode is OFF for this repo" >&2
-  echo "ruori: see https://github.com/Arch-vile/ruori/blob/main/readme.md for why and how you should use container mode" >&2
-  read -r -p "ruori: press Enter to continue in host mode... " _container_nudge_ack
+  log_file_read "$host_mode_ack_file_path"
+  if [ -f "$host_mode_ack_file_path" ]; then
+    echo "ruori: host mode is fine for this repo. Won't nudge about container mode again (delete $host_mode_ack_file_path, or see 'ruori resources', to bring the nudge back)." >&2
+  else
+    echo "ruori: container mode is OFF for this repo" >&2
+    echo "ruori: see https://github.com/Arch-vile/ruori/blob/main/readme.md for why and how you should use container mode" >&2
+    echo "ruori: run 'ruori --host-mode-fine' once to silence this nudge for this repo" >&2
+    read -r -p "ruori: press Enter to continue in host mode... " _container_nudge_ack
+  fi
 fi
 
 # Tracks the iTerm2 window opened for the currently-active worktree, so

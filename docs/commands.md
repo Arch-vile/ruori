@@ -41,6 +41,17 @@ Launching from a linked worktree would silently give those a different
 value depending on where you happened to launch `ruori` from, rather
 than erroring loudly.
 
+If this repo doesn't have [container mode](container-sandbox-guide.md)
+turned on, each `switch`/`new` pauses once with a reminder before
+falling through to host mode — Enter continues either way, it's a nudge
+rather than a gate. Pass `--host-mode-fine` once, anywhere in the
+arguments (`ruori --host-mode-fine`, `ruori new <branch>
+--host-mode-fine`), to acknowledge it for this repo; after that, every
+`switch`/`new` still prints a one-line reminder that host mode is on
+(so it's never silently forgotten), but no longer blocks waiting for
+Enter. See `ruori resources` for the marker file that tracks the
+acknowledgment and how to delete it to bring the blocking nudge back.
+
 ### The picker
 
 Shows a blank/`*` current-worktree marker, `TMUX` (active/-), `CLAUDE`
