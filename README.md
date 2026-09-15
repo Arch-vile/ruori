@@ -8,19 +8,16 @@ terminal, editor, and coding agent follow you there.
 ## Why this exists
 
 Running more than one coding agent at once means running more than one
-git worktree — each agent needs its own directory so they don't step
-on each other's files. Worktrees make that possible, but switching
-between them by hand is a chore: `cd` into the right one, make sure a
-terminal's running there, open an editor, copy over `.env` files,
-dodge port collisions.
+git worktree, since each agent needs its own directory so they don't
+step on each other's files. Worktrees make that possible, but
+switching between them by hand is a chore: `cd` into the right one,
+make sure a terminal's running there, open an editor, copy over `.env`
+files, dodge port collisions.
 
-`ruori` handles two things:
-
-1. **Makes working with worktrees painless** — one keypress switches
-   your terminal, editor, and agent over to a different worktree.
-2. **Containerizes each worktree**, so an agent running with
-   permission checks off is boxed in to that worktree instead of your
-   whole machine.
+`ruori` makes working with a pile of worktrees painless — one keypress
+switches your terminal, editor, and agent over to a different
+worktree — and can run each worktree's agent sandboxed in its own
+container, with strict tool isolation from the rest of your machine.
 
 ## Install
 
@@ -60,28 +57,16 @@ other commands (`new`, `list`, `rm`, and the rest), see
 ## Dev container
 
 By default `ruori` runs a worktree's terminal session — and whatever
-agent or dev server you start in it — directly on your host. If that
-agent has permission checks turned off, it can touch anything your
-host user account can touch.
+agent or dev server you start in it — directly on your host. `ruori`
+can instead run that session sandboxed in its own Docker container per
+worktree, with strict tool isolation from the rest of your machine.
+It's opt-in per repo and works with any agent, since `ruori` only
+manages the container's lifecycle and never decides what runs inside
+it.
 
-**Container mode** boxes each worktree's session into its own Docker
-container instead, mounting only that worktree's directory (and the
-shared git data all worktrees of a repo need) — nothing else on your
-machine is reachable from inside it. It's opt-in per repo and works
-with any agent, since `ruori` only manages the container's lifecycle
-and never decides what runs inside it.
-
-This is also what closes
-[Arch-vile/ruori#16](https://github.com/Arch-vile/ruori/issues/16).
-See [docs/container-sandbox-guide.md](docs/container-sandbox-guide.md)
-for the full setup walkthrough — or just run `ruori init` (below) and
-hand the prompt to your coding agent.
-
-## Getting the most out of `ruori`
-
-`ruori` works out of the box with just `.env` copying. To get the full
-picture — a generated `.ruori.conf`, a container-mode Dockerfile, and
-the Claude Code status hooks that power the `CLAUDE` column — run:
+`ruori` works out of the box with no setup beyond `.env` copying. To
+turn on container mode — along with a generated `.ruori.conf` and the
+Claude Code status hooks that power the `CLAUDE` column — run:
 
 ```sh
 cd ~/git/some-repo
@@ -96,6 +81,9 @@ agent — any agent, this isn't a Claude Code skill — and it'll follow
 `new-repo-setup-guide.md` to inspect the repo, propose `.ruori.conf`
 and Dockerfile contents, and write them once you confirm. Nothing to
 commit on ruori's behalf.
+
+See [docs/container-sandbox-guide.md](docs/container-sandbox-guide.md)
+for the full container-mode walkthrough.
 
 ## Going further
 
