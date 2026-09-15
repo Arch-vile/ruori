@@ -7,19 +7,17 @@ terminal, editor, and coding agent follow you there.
 
 ## Why this exists
 
-Working on several branches at once (especially with a coding agent
-running in each one) means juggling git worktrees. Every time you
-switch, you end up doing the same chores by hand: `cd` into the right
-directory, make sure a terminal session is actually running there,
-open VS Code in that folder, copy over your `.env` file because a
-fresh worktree never has it, and hope you don't collide with another
-worktree's dev server port.
+Running more than one coding agent at once means running more than one
+git worktree, since each agent needs its own directory so they don't
+step on each other's files. Worktrees make that possible, but
+switching between them by hand is a chore: `cd` into the right one,
+make sure a terminal's running there, open an editor, copy over `.env`
+files, dodge port collisions.
 
-`ruori` turns all of that into one keypress. Run it, pick a worktree
-from a list, and it sets up everything for you — a persistent terminal
-session, an editor window, your env files — so switching context takes
-a second instead of a minute, and you can keep several agents working
-in parallel without losing track of them.
+`ruori` makes working with a pile of worktrees painless — one keypress
+switches your terminal, editor, and agent over to a different
+worktree — and can run each worktree's agent sandboxed in its own
+container, with strict tool isolation from the rest of your machine.
 
 ## Install
 
@@ -50,43 +48,25 @@ VS Code window rooted there. Pick a different one later and it switches
 you over cleanly, closing the old terminal window while leaving
 whatever was running in it untouched in the background.
 
-A few commands round out the everyday flow:
-
-```sh
-ruori new <branch>   # create a worktree for a new branch and jump into it
-ruori list           # see all your worktrees, their branches, and status at a glance
-ruori rm <branch>    # clean up a worktree you're done with
-```
-
 That's the whole workflow. Run `ruori` with no arguments whenever you
 want to switch — it loops back to the picker each time, so you can
-leave it running in a terminal you keep around just for this.
+leave it running in a terminal you keep around just for this. For the
+other commands (`new`, `list`, `rm`, and the rest), see
+[docs/commands.md](docs/commands.md).
 
-## Going further
+## Dev container
 
-- **Full command and keybinding reference** — every command, and every
-  key you can press in the picker (create/delete a worktree, kill a
-  session, refresh status): [docs/commands.md](docs/commands.md)
-- **What the picker's columns mean** — the `TMUX`, `CLAUDE`,
-  `PR`, and `USAGE` columns, and how each is kept up to date:
-  [docs/dashboard-columns.md](docs/dashboard-columns.md)
-- **The config file** — `.ruori.conf`, and how `ruori` decides which
-  env files to copy into a new worktree:
-  [docs/config-file.md](docs/config-file.md)
-- **Running your agent in a container**, so it's sandboxed to just the
-  worktree it's working in rather than your whole machine:
-  [docs/container-sandbox-guide.md](docs/container-sandbox-guide.md)
-- **Troubleshooting** — mainly leftover iTerm2 windows:
-  [docs/troubleshooting.md](docs/troubleshooting.md)
-- **Setting up a new repo** — the full walkthrough `ruori init` (below)
-  points your agent at:
-  [docs/new-repo-setup-guide.md](docs/new-repo-setup-guide.md)
+By default `ruori` runs a worktree's terminal session — and whatever
+agent or dev server you start in it — directly on your host. `ruori`
+can instead run that session sandboxed in its own Docker container per
+worktree, with strict tool isolation from the rest of your machine.
+It's opt-in per repo and works with any agent, since `ruori` only
+manages the container's lifecycle and never decides what runs inside
+it.
 
-## Setting up `ruori` for a repo
-
-`ruori` works out of the box with just `.env` copying. To get the full
-picture — a generated `.ruori.conf`, a container-mode Dockerfile, and
-the Claude Code status hooks that power the `CLAUDE` column — run:
+`ruori` works out of the box with no setup beyond `.env` copying. To
+turn on container mode — along with a generated `.ruori.conf` and the
+Claude Code status hooks that power the `CLAUDE` column — run:
 
 ```sh
 cd ~/git/some-repo
@@ -101,6 +81,26 @@ agent — any agent, this isn't a Claude Code skill — and it'll follow
 `new-repo-setup-guide.md` to inspect the repo, propose `.ruori.conf`
 and Dockerfile contents, and write them once you confirm. Nothing to
 commit on ruori's behalf.
+
+See [docs/container-sandbox-guide.md](docs/container-sandbox-guide.md)
+for the full container-mode walkthrough.
+
+## Going further
+
+- **Full command and keybinding reference** — every command, and every
+  key you can press in the picker (create/delete a worktree, kill a
+  session, refresh status): [docs/commands.md](docs/commands.md)
+- **What the picker's columns mean** — the `TMUX`, `CLAUDE`,
+  `PR`, and `USAGE` columns, and how each is kept up to date:
+  [docs/dashboard-columns.md](docs/dashboard-columns.md)
+- **The config file** — `.ruori.conf`, and how `ruori` decides which
+  env files to copy into a new worktree:
+  [docs/config-file.md](docs/config-file.md)
+- **Troubleshooting** — mainly leftover iTerm2 windows:
+  [docs/troubleshooting.md](docs/troubleshooting.md)
+- **Setting up a new repo** — the full walkthrough `ruori init` (above)
+  points your agent at:
+  [docs/new-repo-setup-guide.md](docs/new-repo-setup-guide.md)
 
 ## Roadmap
 
