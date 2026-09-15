@@ -64,7 +64,7 @@ Done: a `CLAUDE` (busy/idle/-) column, via Claude Code's
 `UserPromptSubmit`/`Stop` hooks writing status to a small state file
 `ruori` reads — see README.md "Claude busy/idle status". Container-mode
 only, by design: the hooks are baked into the repo's own Dockerfile
-(via `ruori init` + the `ruori-setup-repo` skill, see
+(via `ruori init` and the guide it copies out, see
 `docs/new-repo-setup-guide.md`), never installed on the host. A repo
 not in container mode just always reads `-`.
 

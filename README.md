@@ -87,18 +87,20 @@ the Claude Code status hooks that power the `CLAUDE` column — run:
 
 ```sh
 cd ~/git/some-repo
-ruori init   # writes .claude/skills/ruori-setup-repo/SKILL.md
-git add .claude && git commit -m "Add ruori-setup-repo skill"
+ruori init   # copies the setup guide into ruori's own state dir
+             # and prints a prompt for your coding agent
 ```
 
-Then, in a normal Claude Code session in that repo, ask it to run the
-`ruori-setup-repo` skill. It'll inspect the repo, propose config and
-Dockerfile contents, and write them once you confirm. Committing the
-skill means every contributor's Claude Code session in this repo can
-run it, not just yours.
+`ruori init` doesn't touch this repo at all — it just copies
+[docs/new-repo-setup-guide.md](docs/new-repo-setup-guide.md) into
+ruori's own storage (`ruori resources` shows exactly where) and prints
+a one-line prompt. Paste that into a session with your coding agent —
+any agent, this isn't a Claude Code skill — and it'll inspect the
+repo, propose `.ruori.conf` and Dockerfile contents, and write them
+once you confirm. Nothing to commit on ruori's behalf.
 
-Setting `ruori` up for a repo that doesn't have it yet, without going
-through `ruori init` first? Point an AI agent directly at
+Setting `ruori` up for a repo without running `ruori init` first? Point
+an AI agent directly at
 [docs/new-repo-setup-guide.md](docs/new-repo-setup-guide.md) — it's the
 same self-contained guide, and it asks before writing anything.
 

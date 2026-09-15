@@ -167,7 +167,10 @@ the configuration-driven pieces it points at.
 
 ## `ruori init`
 
-One-time per repo: writes a Claude Code skill,
-`.claude/skills/ruori-setup-repo/SKILL.md`, that an agent can run to
-generate that repo's `.ruori.conf` and `.devcontainer/Dockerfile`. See
-the [README's "Setting up ruori for a repo"](../README.md#setting-up-ruori-for-a-repo).
+One-time per repo: copies `docs/new-repo-setup-guide.md` into ruori's
+own state dir (`<common-git-dir>/ruori/new-repo-setup-guide.md`, see
+`ruori resources`) and prints a prompt to hand to your coding agent —
+any agent, since it's just a file, not a Claude-Code-specific skill.
+The agent reads it and proposes that repo's `.ruori.conf` and
+`.devcontainer/Dockerfile`. See the
+[README's "Setting up ruori for a repo"](../README.md#setting-up-ruori-for-a-repo).
