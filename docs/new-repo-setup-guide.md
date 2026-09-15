@@ -1,6 +1,6 @@
-# Setting up `ruori` config for a new repo — instructions for an AI agent
+# Setting up `ruori` config for a new repo
 
-You are being asked to create the config `ruori` (a
+Follow this to create the config `ruori` (a
 git-worktree context switcher) needs for **this repo** —
 `.ruori.conf` *and* a `.devcontainer/Dockerfile` (plus two
 small files the Dockerfile copies in, see step 3). All of this is part

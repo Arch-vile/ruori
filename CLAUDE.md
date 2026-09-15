@@ -129,15 +129,16 @@ change:
   command string that will run inside a spawned window, rather than
   relying on a bare `tmux`/`docker` lookup happening again there.
 - `ruori init` doesn't configure the repo directly — it copies
-  `docs/new-repo-setup-guide.md` into ruori's own state dir
+  `README.md` and every file in `docs/` into ruori's own state dir
   (`ruori_state_dir`, not the repo) and prints a prompt for the user to
   hand to whatever coding agent they use; nothing about it is
   Claude-Code-specific, and nothing gets committed to the repo on
-  ruori's behalf. `docs/agent-config-guide.md` is a similar
-  self-contained instruction set, meant to be handed directly to an
-  agent to generate just the `.ruori.conf` `copy` directives. Changes to
-  either guide should keep them self-contained (an agent may be pointed
-  at just that one file with no other repo context).
+  ruori's behalf. There's deliberately no separate agent-only doc set —
+  `docs/new-repo-setup-guide.md` is the one an agent actually follows to
+  write `.ruori.conf`/the Dockerfile, and it's self-contained (an agent
+  may be pointed at just that one file with no other repo context) but
+  otherwise just another doc a human can read too, same as everything
+  else under `docs/`.
 - Destructive operations (`delete_worktree`, `git worktree remove
   --force`) always confirm interactively — there's no non-interactive
   override, by design.

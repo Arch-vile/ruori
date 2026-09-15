@@ -45,11 +45,10 @@ copy config/local.json
 copy secrets/*.local.yaml
 ```
 
-You (or an AI coding agent) can generate this file for a given repo —
-see [agent-config-guide.md](agent-config-guide.md) for a self-contained
-set of instructions written for exactly that: point an agent at it, in
-whatever repo you want `ruori` set up in, and it'll inspect that repo's
-`.gitignore`/config and write a sensible `.ruori.conf`.
+You (or an AI coding agent — this page is a fine thing to point one at
+directly) can generate this file for a given repo: inspect that repo's
+`.gitignore`/config and write a sensible `.ruori.conf` from the format
+above.
 
 Four more directives opt a repo into **container mode**: `container`,
 `container-file`, `container-port`, `container-copy`. See the
