@@ -43,7 +43,7 @@ it into a container** — one container per worktree. Specifically:
 
 Add these to `.ruori.conf` at the main worktree's root (same
 file the `copy` directive already lives in — see
-`docs/agent-config-guide.md` for that one). All are opt-in; a repo
+`docs/config-file.md` for that one). All are opt-in; a repo
 with none of these behaves exactly as it does today.
 
 - **`container on`** (bare `container`, i.e. no value, also works) —

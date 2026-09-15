@@ -56,8 +56,9 @@ accurate for the whole time a subagent is running;
 `PermissionRequest`/`Elicitation` drive the `waiting` state.
 
 **These hooks live entirely inside the repo's own container image** —
-baked into the Dockerfile by the `ruori-setup-repo` skill that `ruori
-init` installs — never in the host's own `~/.claude/settings.json`.
+baked into the Dockerfile by whatever coding agent followed the guide
+`ruori init` copies out — never in the host's own
+`~/.claude/settings.json`.
 `ruori` itself never edits any Claude Code config, on the host or
 otherwise; a repo not in container mode simply doesn't get this column,
 by design, rather than `ruori` reaching into your host Claude Code

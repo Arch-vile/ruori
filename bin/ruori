@@ -1502,9 +1502,9 @@ case "$cmd" in
   init)
     # Resolves the ruori checkout `bin/ruori` was symlinked from
     # (the README's own install step: `ln -s .../bin/ruori ~/.local/bin/ruori`)
-    # so the skill file below can be built from the real
-    # docs/new-repo-setup-guide.md sitting next to it, rather than a
-    # second copy baked into this script that could drift out of sync.
+    # so the docs copied below come from the real README.md/docs/ sitting
+    # next to it, rather than a second copy baked into this script that
+    # could drift out of sync.
     # Manual symlink-chain resolution, not `readlink -f` (missing on some
     # macOS/BSD `readlink`s) — BASH_SOURCE[0], not $0, since $0 is just
     # whatever name this script was invoked as (e.g. `ruori`, if found via
@@ -1519,28 +1519,43 @@ case "$cmd" in
       esac
     done
     ruori_root="$(dirname "$(cd -P "$(dirname "$ruori_src")" && pwd)")"
-    guide_src="$ruori_root/docs/new-repo-setup-guide.md"
-    if [ ! -f "$guide_src" ]; then
-      echo "ruori: init: can't find $guide_src" >&2
+    readme_src="$ruori_root/README.md"
+    docs_src="$ruori_root/docs"
+    if [ ! -f "$readme_src" ] || [ ! -d "$docs_src" ]; then
+      echo "ruori: init: can't find $readme_src / $docs_src" >&2
       echo "ruori: init: is 'ruori' still a symlink into a ruori checkout? (see README.md 'Install')" >&2
       exit 1
     fi
 
-    skill_dir="$repo_root/.claude/skills/ruori-setup-repo"
-    mkdir -p "$skill_dir"
-    log_file_read "$guide_src"
-    log_file_write "$skill_dir/SKILL.md"
-    {
-      printf '%s\n' '---'
-      printf '%s\n' 'name: ruori-setup-repo'
-      printf '%s\n' "description: 'Set up ruori for this repo: write .ruori.conf and a container-mode Dockerfile, with the Claude Code busy/waiting/idle status hook baked into the image itself, never into host Claude Code config. Trigger phrases: set up ruori, ruori init, configure ruori for this repo, ruori-setup-repo.'"
-      printf '%s\n' '---'
-      printf '\n'
-      cat "$guide_src"
-    } >"$skill_dir/SKILL.md"
+    # Copied into ruori's own state dir rather than committed into the
+    # repo (e.g. as a Claude-Code-specific skill file) so this works with
+    # whatever coding agent the user has, and needs no git add/commit --
+    # they're throwaway once an agent has acted on them. The whole doc
+    # set is copied, not just the setup guide, since there's no separate
+    # agent-only doc: an agent reading these is just another reader of
+    # the same docs a human would use, and may need the extra context
+    # (config-file.md, container-sandbox-guide.md, ...) the guide itself
+    # links out to.
+    state_dir="$(ruori_state_dir)" || exit 1
+    readme_dest="$state_dir/readme.md"
+    docs_dest="$state_dir/docs"
+    mkdir -p "$docs_dest"
+    log_file_read "$readme_src"
+    log_file_write "$readme_dest"
+    cp "$readme_src" "$readme_dest"
+    for doc_src in "$docs_src"/*.md; do
+      [ -f "$doc_src" ] || continue
+      log_file_read "$doc_src"
+      log_file_write "$docs_dest/$(basename "$doc_src")"
+      cp "$doc_src" "$docs_dest/$(basename "$doc_src")"
+    done
 
-    echo "ruori: wrote $skill_dir/SKILL.md"
-    echo "ruori: commit it, then ask Claude Code (in a normal host session, in this repo) to run the ruori-setup-repo skill"
+    echo "ruori: wrote $readme_dest and $docs_dest/"
+    echo "ruori: ask your coding agent, in a session in this repo, to:"
+    echo ""
+    echo "  Read $readme_dest to get oriented, then follow"
+    echo "  $docs_dest/new-repo-setup-guide.md to set up ruori for this repo"
+    echo "  (the rest of $docs_dest/ has more detail if it's needed)."
     exit 0
     ;;
   list)
@@ -1653,9 +1668,11 @@ case "$cmd" in
     resources_entry "$common_dir/ruori/file-io.log" "Debug-only -- for troubleshooting/transparency (see docs/troubleshooting.md). An append-only log of every read/write ruori's own script code performs against a file (state/cache files, $CONFIG_FILENAME, worktree copy-in, generated files) -- not file access done inside a child process it shells out to (git, docker, code, fzf, osascript), which isn't observable here. Written by every ruori command that touches a file, including read-only ones like 'list'."
     resources_entry "$common_dir/ruori/iterm-window" "Internal to ruori. Tracks the single iTerm2 window id the manager loop currently owns, so switching worktrees closes the right window before opening a new one instead of leaking windows behind. Written by ruori every time it opens or closes that window; only meaningful while the manager loop is running."
     resources_entry "$common_dir/ruori/shared" "This is RUORI_SHARED_DIR (see the 'Managed resources' section below) -- only present if container mode is on. ruori itself never writes anything under it; whatever's there was put there by this repo's own Dockerfile/entrypoint (e.g. 'ruori-claude-home', if this repo shares Claude Code's login -- see docs/container-sandbox-guide.md's 'Recipe: Claude Code auth')."
+    resources_entry "$common_dir/ruori/readme.md" "Not read back by ruori -- a plain copy of ruori's own README.md, written by 'ruori init' alongside the docs/ copy below for you to hand to a coding agent (any agent; it's just a file, not a Claude Code skill). Safe to delete once an agent has read it; re-run 'ruori init' any time for a fresh copy."
+    resources_entry "$common_dir/ruori/docs" "Not read back by ruori -- a plain copy of every file in ruori's own docs/ directory (the tool's docs, not this repo's), written by 'ruori init' so an agent has everything new-repo-setup-guide.md (the file to actually follow) links out to, without a second, agent-only copy of any of it. Safe to delete once an agent has acted on it; re-run 'ruori init' any time for a fresh copy."
     resources_scope "Worktree"
     resources_entry "$worktree_path/.ruori" "Everything an external agent hook writes at this worktree's root lives under this one directory -- not written by ruori itself, but ruori only ever reads the two well-known files below from it. Needs a **global** gitignore entry (not a per-repo one), or 'git worktree remove' will refuse to remove this worktree."
-    resources_entry "$worktree_path/$CLAUDE_STATUS_FILENAME" "You don't write this, but it's worth knowing about: it's what makes the picker's CLAUDE (busy/waiting/idle) column work for this worktree. Written by Claude Code's own hooks -- baked into this repo's container image by the setup skill 'ruori init' installs, never by ruori itself -- every time Claude's status changes. Only present/updated if this worktree runs in container mode."
+    resources_entry "$worktree_path/$CLAUDE_STATUS_FILENAME" "You don't write this, but it's worth knowing about: it's what makes the picker's CLAUDE (busy/waiting/idle) column work for this worktree. Written by Claude Code's own hooks -- baked into this repo's container image following the guide 'ruori init' copies out, never by ruori itself -- every time Claude's status changes. Only present/updated if this worktree runs in container mode."
     resources_entry "$worktree_path/$AGENT_USAGE_FILENAME" "Same story as the status file above: not written by ruori, and takes priority over the host-side scan when present and fresh (see Global above) -- the working source of the USAGE number for a worktree running in a container that does NOT share Claude Code's login via RUORI_SHARED_DIR (its own ~/.claude/projects isn't visible to the host otherwise). Written by that same container-baked Claude Code hook each time Claude goes idle, as a running total, if that hook computes one -- this repo's own hook doesn't (see docs/container-sandbox-guide.md's 'Recipe: Claude Code auth'), relying on the host-side scan instead."
 
     resources_section "Configuration"
@@ -1663,8 +1680,7 @@ case "$cmd" in
     resources_none
     resources_scope "Repository"
     resources_entry "$main_worktree_path/$CONFIG_FILENAME" "Yours to write and edit -- ruori never creates or modifies it, only reads it. Tells ruori which gitignored files to copy into a fresh worktree ('copy') and whether/how to run this repo in container mode ('container*' directives). Read fresh on every ruori invocation; see docs/config-file.md."
-    resources_entry "$main_worktree_path/$dockerfile_rel" "Yours to write, usually via the ruori-setup-repo skill from 'ruori init' -- ruori only reads it, to 'docker build' this repo's shared image. Only matters if $CONFIG_FILENAME has 'container on'; ruori never looks at it otherwise. Read (and rebuilt from) fresh on every container start, so editing it takes effect on your next switch."
-    resources_entry "$main_worktree_path/.claude/skills/ruori-setup-repo/SKILL.md" "Generated once by 'ruori init'; after that it's yours to commit -- ruori itself never reads it back, it's written purely for a Claude Code session to run. Re-run 'ruori init' only if you want it regenerated from a newer ruori install."
+    resources_entry "$main_worktree_path/$dockerfile_rel" "Yours to write, usually with a coding agent's help after 'ruori init' (see $common_dir/ruori/docs/new-repo-setup-guide.md above) -- ruori only reads it, to 'docker build' this repo's shared image. Only matters if $CONFIG_FILENAME has 'container on'; ruori never looks at it otherwise. Read (and rebuilt from) fresh on every container start, so editing it takes effect on your next switch."
     resources_scope "Worktree"
     resources_none
 

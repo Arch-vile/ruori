@@ -78,6 +78,9 @@ leave it running in a terminal you keep around just for this.
   [docs/container-sandbox-guide.md](docs/container-sandbox-guide.md)
 - **Troubleshooting** — mainly leftover iTerm2 windows:
   [docs/troubleshooting.md](docs/troubleshooting.md)
+- **Setting up a new repo** — the full walkthrough `ruori init` (below)
+  points your agent at:
+  [docs/new-repo-setup-guide.md](docs/new-repo-setup-guide.md)
 
 ## Setting up `ruori` for a repo
 
@@ -87,20 +90,17 @@ the Claude Code status hooks that power the `CLAUDE` column — run:
 
 ```sh
 cd ~/git/some-repo
-ruori init   # writes .claude/skills/ruori-setup-repo/SKILL.md
-git add .claude && git commit -m "Add ruori-setup-repo skill"
+ruori init   # copies this README and docs/ into ruori's own state dir
+             # and prints a prompt for your coding agent
 ```
 
-Then, in a normal Claude Code session in that repo, ask it to run the
-`ruori-setup-repo` skill. It'll inspect the repo, propose config and
-Dockerfile contents, and write them once you confirm. Committing the
-skill means every contributor's Claude Code session in this repo can
-run it, not just yours.
-
-Setting `ruori` up for a repo that doesn't have it yet, without going
-through `ruori init` first? Point an AI agent directly at
-[docs/new-repo-setup-guide.md](docs/new-repo-setup-guide.md) — it's the
-same self-contained guide, and it asks before writing anything.
+`ruori init` doesn't touch this repo at all — it just copies these
+docs into ruori's own storage (`ruori resources` shows exactly where)
+and prints a prompt. Paste that into a session with your coding
+agent — any agent, this isn't a Claude Code skill — and it'll follow
+`new-repo-setup-guide.md` to inspect the repo, propose `.ruori.conf`
+and Dockerfile contents, and write them once you confirm. Nothing to
+commit on ruori's behalf.
 
 ## Roadmap
 
