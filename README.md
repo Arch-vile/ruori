@@ -5,21 +5,22 @@
 A fast, one-key way to switch between git worktrees — and have your
 terminal, editor, and coding agent follow you there.
 
-## Why this exists
+## Motivation
 
 Running more than one coding agent at once means running more than one
 git worktree, since each agent needs its own directory so they don't
-step on each other's files. Worktrees make that possible, but
-switching between them by hand is a chore: `cd` into the right one,
-make sure a terminal's running there, open an editor, copy over `.env`
-files, dodge port collisions.
+step on each other's toes. Worktrees make that possible, but
+switching between them by hand is a chore: opening your IDE there,
+copying env files to start the application and handling port conflicts
+to name a few.
 
-`ruori` makes working with a pile of worktrees painless — one keypress
+`ruori` makes working with worktrees painless — simple TUI
 switches your terminal, editor, and agent over to a different
-worktree — and can run each worktree's agent sandboxed in its own
-container, with strict tool isolation from the rest of your machine.
+worktree and takes care of all the plumbing work.
 
 ## Install
+
+| TODO: list needs updating, alternatives and such.
 
 Requirements: `git`, `tmux`, `fzf`, and the `code` CLI (VS Code) on your
 `PATH`, plus iTerm2 with **Settings > General > Magic > "Allow all apps
@@ -29,7 +30,7 @@ covers the two you probably don't have yet, VS Code's `code` command is
 added via its command palette ("Shell Command: Install 'code' command
 in PATH"), and iTerm2 is at [iterm2.com](https://iterm2.com/).
 
-Then symlink the script onto your `PATH`:
+Then symlink the `ruori` script onto your `PATH`:
 
 ```sh
 ln -s "$(pwd)/bin/ruori" ~/.local/bin/ruori   # or any dir on your PATH
@@ -48,25 +49,15 @@ VS Code window rooted there. Pick a different one later and it switches
 you over cleanly, closing the old terminal window while leaving
 whatever was running in it untouched in the background.
 
-That's the whole workflow. Run `ruori` with no arguments whenever you
-want to switch — it loops back to the picker each time, so you can
-leave it running in a terminal you keep around just for this. For the
-other commands (`new`, `list`, `rm`, and the rest), see
-[docs/commands.md](docs/commands.md).
+See available commands in [docs/commands.md](docs/commands.md).
 
-## Dev container
+## Hot features you want to use 🔥
 
-By default `ruori` runs a worktree's terminal session — and whatever
-agent or dev server you start in it — directly on your host. `ruori`
-can instead run that session sandboxed in its own Docker container per
-worktree, with strict tool isolation from the rest of your machine.
-It's opt-in per repo and works with any agent, since `ruori` only
-manages the container's lifecycle and never decides what runs inside
-it.
+To get the most out of Ruori you want to do a proper configuration per
+repository. You can configure Ruori manually (see docs) but the easiest
+way is to use your favourite AI agent.
 
-`ruori` works out of the box with no setup beyond `.env` copying. To
-turn on container mode — along with a generated `.ruori.conf` and the
-Claude Code status hooks that power the `CLAUDE` column — run:
+To setup ruori and get access to advanced features:
 
 ```sh
 cd ~/git/some-repo
@@ -74,13 +65,23 @@ ruori init   # copies this README and docs/ into ruori's own state dir
              # and prints a prompt for your coding agent
 ```
 
-`ruori init` doesn't touch this repo at all — it just copies these
-docs into ruori's own storage (`ruori resources` shows exactly where)
-and prints a prompt. Paste that into a session with your coding
-agent — any agent, this isn't a Claude Code skill — and it'll follow
-`new-repo-setup-guide.md` to inspect the repo, propose `.ruori.conf`
-and Dockerfile contents, and write them once you confirm. Nothing to
-commit on ruori's behalf.
+### Handling git ignored files
+
+By default git worktrees do not include git ignored files from parent.
+Often you would like some of those files to be carried over to a worktree,
+notably any env files needed for to start the application.
+
+Ruori supports copying specified files over to your worktrees.
+
+### Devoloper container
+
+By default Ruori runs all tools directly on your host but you can configure
+it to start its own Docker container per worktree allowing isolation from
+the rest of your machine.
+
+Now you can finally run your AI agent in YOLO mode.
+
+NOTE: you worktree directory is writable from the container.
 
 See [docs/container-sandbox-guide.md](docs/container-sandbox-guide.md)
 for the full container-mode walkthrough.
@@ -102,9 +103,4 @@ for the full container-mode walkthrough.
   points your agent at:
   [docs/new-repo-setup-guide.md](docs/new-repo-setup-guide.md)
 
-## Roadmap
 
-Not yet built: AeroSpace workspace assignment, so switching worktrees
-also moves the active editor and terminal to a dedicated workspace and
-backgrounds the rest. See [TODO.md](TODO.md) for the full list of
-in-progress and planned work.
