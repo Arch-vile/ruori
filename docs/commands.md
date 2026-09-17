@@ -9,10 +9,10 @@ Run this in a terminal window you keep open as your **manager**. It
 lists the git worktrees of whatever repo you're standing in, lets you
 fzf-pick one, and on each pick:
 
-- copies files matching the configured patterns (`.env`/`.env.*` by
-  default — see [config-file.md](config-file.md)) from the main
-  worktree into the target worktree if they're missing there (never
-  overwrites an existing file)
+- copies files matching the configured `copy` patterns (see
+  [config-file.md](config-file.md); nothing is copied without a
+  `.ruori.conf`) from the main worktree into the target worktree if
+  they're missing there (never overwrites an existing file)
 - creates (or reuses) a tmux session named `<repo>__<branch>__<hash>`
   rooted in that worktree — a brand-new session starts `claude --resume`
   (Claude's own picker: resume a past conversation for that directory,
