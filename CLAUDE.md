@@ -52,8 +52,11 @@ change:
    parser every accessor (`copy_patterns`, `container_mode_enabled`,
    `container_file_path`, `container_ports`, `container_copy_entries`)
    reads from; `KNOWN_CONFIG_DIRECTIVES` is the one place unrecognized
-   keys get flagged. No config file at all falls back to copying
-   `.env`/`.env.*`. See `docs/config-file.md`.
+   keys get flagged. No config file, or one with no `copy` lines, means
+   nothing gets copied — env-file copying is opt-in, not a hardcoded
+   default. `copy` patterns support `**` for matching across
+   subdirectories (globstar, enabled locally by `sync_env_files`). See
+   `docs/config-file.md`.
 4. **Container mode** (`docs/container-sandbox-plan.md`,
    `docs/container-sandbox-guide.md`) — opt-in per *repo* via `container
    on`, never per worktree; `CONTAINER_MODE` is computed once at startup

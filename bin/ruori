@@ -336,14 +336,14 @@ warn_unknown_directives() {
 # worktree root) of files to copy into a worktree missing them. Plain
 # filenames match exactly (a full path, e.g. "config/local.json", too);
 # shell wildcards (*, ?, [...]) work as well, including partway through
-# a path (e.g. "config/*.local.json"). Falls back to .env/.env.* when
-# there's no config file at all.
+# a path (e.g. "config/*.local.json"), and "**" matches across
+# subdirectories (e.g. "**/.env" for every .env under the repo, at any
+# depth) — see sync_env_files, which enables globstar for the expansion.
+# No config file, or one with no "copy" lines, means nothing gets
+# copied — opt in explicitly rather than relying on a hardcoded default.
 copy_patterns() {
   local config_file="$main_worktree_path/$CONFIG_FILENAME"
-  if [ ! -f "$config_file" ]; then
-    printf '%s\n' '.env' '.env.*'
-    return 0
-  fi
+  [ -f "$config_file" ] || return 0
   local key value
   while IFS=$'\t' read -r key value; do
     [ "$key" = "copy" ] || continue
@@ -441,6 +441,13 @@ sync_env_files() {
   local target_path="$1"
   [ "$target_path" = "$main_worktree_path" ] && return 0
 
+  # globstar makes "**" in a pattern match across subdirectories (e.g.
+  # "**/.env"); save/restore the prior setting since nothing else in the
+  # script relies on it and a caller's own shell shouldn't be affected.
+  local had_globstar=1
+  shopt -q globstar || had_globstar=0
+  shopt -s globstar
+
   local pattern f rel target_file
   while IFS= read -r pattern; do
     [ -n "$pattern" ] || continue
@@ -457,6 +464,8 @@ sync_env_files() {
       fi
     done
   done < <(copy_patterns)
+
+  [ "$had_globstar" = "1" ] || shopt -u globstar
 }
 
 path_hash_for() {

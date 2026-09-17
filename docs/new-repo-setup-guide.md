@@ -66,8 +66,11 @@ Format: one directive per line, `copy <pattern>`, where `<pattern>` is
 relative to the repo root — a plain filename/path matches exactly
 (`copy config/local.json`), or a shell wildcard (`*`, `?`, `[...]`)
 works too, including partway through a path (`copy .env.*`,
-`copy secrets/*.local.yaml`). Order doesn't matter; overlapping
-patterns are harmless.
+`copy secrets/*.local.yaml`). `**` matches across subdirectories at
+any depth, which is useful for a monorepo with per-app env files
+(`copy **/.env` catches `.env`, `apps/api/.env`, `apps/client/.env`,
+...) instead of one `copy` line per app. Order doesn't matter;
+overlapping patterns are harmless.
 
 To build the list for this repo:
 

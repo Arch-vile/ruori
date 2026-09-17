@@ -21,8 +21,9 @@ mechanism from env-file copying — see the
 ## Config file
 
 `ruori` looks for `.ruori.conf` at the main worktree's root. It's
-created by you, not `ruori` — if it doesn't exist, `ruori` falls back to
-copying just `.env`/`.env.*` (the previous hardcoded behavior).
+created by you, not `ruori` — if it doesn't exist, or has no `copy`
+lines, `ruori` copies nothing: env-file copying is opt-in, not a
+hardcoded default.
 
 Each line is `<directive> <value>`. Blank lines and lines starting with
 `#` are ignored; an unrecognized directive is warned about and skipped
@@ -35,13 +36,16 @@ gitignored files get copied into a new worktree if it's missing them:
 the value is a glob pattern relative to the repo root. A plain filename
 matches exactly (an exact path, `config/local.json`, works too); shell
 wildcards (`*`, `?`, `[...]`) work as well, including partway through a
-path:
+path; and `**` matches across subdirectories, at any depth, so
+`copy **/.env` picks up `.env`, `apps/api/.env`, and
+`apps/client/.env` alike without listing each one:
 
 ```
 # .ruori.conf — files to copy into a new worktree if missing
 copy .env
 copy .env.*
 copy config/local.json
+copy **/.env
 copy secrets/*.local.yaml
 ```
 
