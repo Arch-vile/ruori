@@ -1909,8 +1909,15 @@ log_iterm() {
 # All the currently open iTerm2 window ids, space-separated. Used by
 # open_iterm_window_for to detect a new window even when the AppleEvent
 # that requested it doesn't report back cleanly (see below).
+#
+# `osascript` exits non-zero on things like AppleEvents permission being
+# denied, which two call sites below assign straight from (`before_ids=`/
+# `after_ids=`) — under the script's `set -e`, an unguarded failure here
+# would kill the whole manager loop mid-switch instead of surfacing the
+# friendly "enable AppleEvents" message further down, so `|| true` keeps
+# that outcome from propagating as this function's own exit status.
 iterm_window_ids() {
-  osascript -e 'tell application "iTerm2" to id of every window' 2>/dev/null | tr -d ','
+  osascript -e 'tell application "iTerm2" to id of every window' 2>/dev/null | tr -d ',' || true
 }
 
 # Where the id of the currently-tracked iTerm2 window is persisted, so a
@@ -1931,8 +1938,15 @@ iterm_window_state_file() {
 # name a completely unrelated window in the current one, and closing that
 # would throw away real work. A pid mismatch therefore means "different
 # iTerm2, this id is meaningless" — see load_active_iterm_window_id.
+#
+# `pgrep -x` exits 1 (with no output) when it finds no match — a normal,
+# expected outcome here, not a failure, so callers can tell "not running"
+# apart from "running". Under the script's `set -e`, an unguarded
+# pipeline would instead kill the whole manager loop the instant iTerm2
+# wasn't found, with zero output to explain why, so `|| true` keeps that
+# outcome from propagating as this function's own exit status.
 iterm_pid() {
-  pgrep -x iTerm2 2>/dev/null | head -n 1
+  pgrep -x iTerm2 2>/dev/null | head -n 1 || true
 }
 
 save_active_iterm_window_id() {
