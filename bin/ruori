@@ -1890,7 +1890,10 @@ fi
 
 # Tracks the iTerm2 window opened for the currently-active worktree, so
 # switching worktrees replaces it instead of piling up one window per
-# switch. Empty until the first successful switch.
+# switch. Empty until the first successful switch. Re-synced from disk by
+# load_active_iterm_window_id at the top of every open_iterm_window_for
+# call, so this initial value only matters for the sliver of time before
+# that first call.
 active_iterm_window_id=""
 
 # Debug log for the iTerm2 window open/close lifecycle — every id ruori
@@ -1969,11 +1972,20 @@ save_active_iterm_window_id() {
   fi
 }
 
-# Adopt the window the previous manager process was tracking, so a
-# restart of `ruori` doesn't orphan it. Only when it is still open and still
-# belongs to the same iTerm2 run; anything else and we forget it, which
-# is the safe direction to be wrong in (a stray window the user closes by
-# hand, rather than one ruori closes out from under them).
+# Re-sync active_iterm_window_id from disk. Called at the top of
+# open_iterm_window_for, on every switch, not just once at manager
+# startup: if more than one `ruori` manager loop is alive for the same
+# repo (e.g. a second terminal tab left sitting at the picker), each
+# process's own in-memory idea of "the currently open window" goes stale
+# the instant a *different* process switches — this call is what lets a
+# long-idle process still find and close whatever window is actually on
+# screen right now instead of leaving it orphaned and piling up a new
+# one. Also what lets a restart of `ruori` itself adopt the window a
+# previous run left open. Only adopts when the persisted window is still
+# open and still belongs to the same iTerm2 run; anything else and we
+# forget it, which is the safe direction to be wrong in (a stray window
+# the user closes by hand, rather than one ruori closes out from under
+# them).
 load_active_iterm_window_id() {
   local f saved_pid saved_id now_pid
   active_iterm_window_id=""
@@ -2042,6 +2054,10 @@ open_iterm_window_for() {
     session_check_cmd="'$tmux_bin' has-session -t '$session'"
     window_title="${repo_name}/${branch}"
   fi
+
+  # Re-sync from disk rather than trusting whatever this process loaded
+  # at its own startup — see load_active_iterm_window_id's comment.
+  load_active_iterm_window_id
 
   log_iterm "open_iterm_window_for: session=${session} active_iterm_window_id(before)=${active_iterm_window_id:-<none>}"
 
@@ -2237,7 +2253,6 @@ fi
 
 echo "ruori: logging iTerm2 window open/close activity to $(iterm_log_file 2>/dev/null || echo '<unavailable>')" >&2
 log_iterm "=== ruori manager loop starting (pid $$) ==="
-load_active_iterm_window_id
 
 # `ruori new <branch>` creates the worktree in the case block above (before
 # these functions existed yet), then defers to here to actually activate
