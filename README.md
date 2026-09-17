@@ -6,6 +6,10 @@ Supercharge your agentic workflow. Ruori makes running simultaneous coding agent
 painless with one-key git worktree switching—keeping your terminal, editor, and AI
 sessions aligned.
 
+<img width="755" height="520" alt="image" src="https://github.com/user-attachments/assets/f7926afa-25a7-4b37-a2aa-9234feab65ff" />
+
+
+
 ## Motivation
 
 Running more than one coding agent at once means running more than one
