@@ -2,8 +2,9 @@
 
 # Ruori
 
-A fast, one-key way to switch between git worktrees — and have your
-terminal, editor, and coding agent follow you there.
+Supercharge your agentic workflow. Ruori makes running simultaneous coding agents
+painless with one-key git worktree switching—keeping your terminal, editor, and AI
+sessions aligned.
 
 ## Motivation
 
