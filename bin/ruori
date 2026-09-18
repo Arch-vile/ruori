@@ -319,7 +319,7 @@ config_directives() {
 # each new accessor (container_mode_enabled, container_file_path,
 # container_ports, container_copy_entries) matches only its own key(s),
 # so this is the single shared place unrecognized keys get flagged.
-KNOWN_CONFIG_DIRECTIVES="copy container container-file container-port container-copy"
+KNOWN_CONFIG_DIRECTIVES="copy container container-file container-port container-copy container-host-port"
 
 warn_unknown_directives() {
   local key value known k
@@ -428,6 +428,18 @@ container_copy_entries() {
     # the worktree/git-common-dir mounts already use.
     [ "$has_container_path" = "1" ] || container_path="$host_path"
     printf '%s\t%s\n' "$host_path" "$container_path"
+  done < <(config_directives)
+}
+
+# One "<port>" line per `container-host-port <port>` directive, in
+# config order. See container_start_host_port_forwards below for what
+# this actually does inside the container.
+container_host_ports() {
+  local key value
+  while IFS=$'\t' read -r key value; do
+    [ "$key" = "container-host-port" ] || continue
+    [ -n "$value" ] || continue
+    printf '%s\n' "$value"
   done < <(config_directives)
 }
 
@@ -676,6 +688,32 @@ release_ports_for() {
   mv "$tmp" "$cache_file"
 }
 
+# Starts one `socat` TCP relay inside container $1 per configured
+# container-host-port, so a process in the container that dials
+# localhost:<port> transparently reaches host.docker.internal:<port> on
+# the host — e.g. a docker-compose-managed database the dev container
+# can't run itself (see docs/container-sandbox-guide.md's "Current
+# limitation: shared backing services"). Docker only has a flag for the
+# opposite direction (`-p`, publishing a *container* port to the host);
+# there's no equivalent for publishing a *host* port onto the
+# container's own loopback, so this runs as an ordinary background
+# process inside the container instead, requiring `socat` in the
+# container image. `docker stop` kills every process in a container,
+# forwarders included, so container_start_if_needed below calls this
+# fresh on every transition to running (both "just created" and
+# "docker start after a stop") rather than once ever.
+container_start_host_port_forwards() {
+  local name="$1" port
+  while IFS= read -r port; do
+    [ -n "$port" ] || continue
+    if ! docker exec "$name" sh -c 'command -v socat' >/dev/null 2>&1; then
+      echo "ruori: container-host-port $port: 'socat' not found in container image, skipping (install it via $(container_file_path))" >&2
+      continue
+    fi
+    docker exec -d "$name" socat "TCP-LISTEN:${port},fork,reuseaddr" "TCP:host.docker.internal:${port}"
+  done < <(container_host_ports)
+}
+
 # running -> no-op; stopped -> `docker start`; absent -> build-if-needed
 # then `docker run -d ... sleep infinity` (a durable PID 1; tmux
 # sessions live inside via `docker exec`, never as the container's main
@@ -684,7 +722,10 @@ release_ports_for() {
 # (container-copy) only ever runs in the "container just created"
 # branch — a stopped-then-restarted container is never re-copied into,
 # which is what makes "delete the container to refresh its copied
-# config" a meaningful, predictable action.
+# config" a meaningful, predictable action. container-host-port
+# forwards (see container_start_host_port_forwards above), by contrast,
+# are (re)started on every transition to running, since `docker stop`
+# kills them along with everything else in the container.
 container_start_if_needed() {
   local session="$1" path="$2" common_dir
   # Separate statement: within one `local a=... b=$a` command, bash
@@ -697,6 +738,7 @@ container_start_if_needed() {
 
   if container_exists "$name"; then
     docker start "$name" >/dev/null
+    container_start_host_port_forwards "$name"
     return 0
   fi
 
@@ -732,6 +774,8 @@ container_start_if_needed() {
     -e "RUORI_SHARED_DIR=$common_dir/ruori/shared" \
     "${port_flags[@]}" \
     "$(container_image_for)" sleep infinity >/dev/null
+
+  container_start_host_port_forwards "$name"
 
   local host_path container_path
   while IFS=$'\t' read -r host_path container_path; do
@@ -1708,6 +1752,9 @@ case "$cmd" in
     if container_mode_enabled; then
       resources_entry "$worktree_session" "This worktree's Docker container -- same name as its tmux session above. Created by ruori the first time you switch to this worktree; stopped (not removed) when its tmux session is killed, and only actually removed by 'ruori rm'."
       resources_entry "(recorded in $common_dir/ruori/ports, once allocated)" "Not something you manage directly -- see 'ruori ports' for this worktree's live host-port mapping, if its container has started at least once. Allocated by ruori the first time this worktree's container starts, and freed when the worktree is removed."
+      if [ -n "$(container_host_ports)" ]; then
+        resources_entry "socat process(es) inside $worktree_session" "Not a file -- one background 'socat' process per configured container-host-port, running inside this worktree's container, relaying localhost:<port> there to host.docker.internal:<port> on the host (see the 'container-host-port' directive in $CONFIG_FILENAME and docs/container-sandbox-guide.md). Started by ruori via 'docker exec -d' every time the container transitions to running -- 'docker stop' kills these along with everything else in the container, so they're never persisted or tracked in a file."
+      fi
     fi
     exit 0
     ;;

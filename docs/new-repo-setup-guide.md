@@ -114,7 +114,7 @@ and gives each concurrently-open worktree its own free host port
 instead of colliding on the same one. Every repo `ruori` is set up for
 gets this.
 
-Four directives go in the same `.ruori.conf` from step 2:
+Five directives go in the same `.ruori.conf` from step 2:
 
 - **`container on`** — activates it. (Bare `container`, i.e. no value,
   also works.) Always include this line — it's what turns the rest of
@@ -137,6 +137,11 @@ Four directives go in the same `.ruori.conf` from step 2:
   to the host). `<container-path>` defaults to the same path as
   `<host-path>` if omitted; a leading `~/` in `<host-path>` expands to
   the host's home directory.
+- **`container-host-port <port>`** — repeatable. Makes
+  `localhost:<port>` reachable from inside the container by running a
+  `socat` relay there to `host.docker.internal:<port>` on the host —
+  see the next bullet for when this applies. Requires `socat` in the
+  Dockerfile.
 
 Ask the user what you need to draft (or verify an existing) Dockerfile
 — this part genuinely needs their input, unlike whether to do container
@@ -160,19 +165,25 @@ mode at all:
   the documented answer is that such a service runs natively on the
   host, **shared across every worktree's dev container** (not one per
   worktree), reachable from inside the container at
-  `host.docker.internal:<port>` instead of `localhost`. Tell the user
-  this plainly if it applies, and don't confuse that service's own
-  containerization (if it has any) with `ruori`'s dev container — they're
-  unrelated (see the intro above).
+  `host.docker.internal:<port>` instead of `localhost`. If the
+  project's own config/`.env` templates assume `localhost` and the user
+  would rather not edit them, propose `container-host-port <port>` for
+  each such port instead (adds `socat` to the Dockerfile) — see the
+  directive above and "Current limitation: shared backing services" in
+  the container sandbox guide. Either way, tell the user this plainly
+  if it applies, and don't confuse that service's own containerization
+  (if it has any) with `ruori`'s dev container — they're unrelated (see
+  the intro above).
 
 The Dockerfile itself needs: `git`, `tmux`, and `jq` installed (`git`
 and `tmux` for `ruori` to attach a session inside the container at all;
 `jq` for the status hook below), the project's runtime, and — if the
 user wants something to auto-start (an agent, the dev server) —
 either the image's own `CMD`/`ENTRYPOINT` or a tmux `default-command`
-baked into a `~/.tmux.conf`. It does not need Docker itself, or any
-host secret beyond what's explicitly `container-copy`'d. Minimal
-shape:
+baked into a `~/.tmux.conf`. Add `socat` too if you proposed any
+`container-host-port` directives above. It does not need Docker
+itself, or any host secret beyond what's explicitly `container-copy`'d.
+Minimal shape:
 
 ```dockerfile
 FROM <base-image>
@@ -356,18 +367,21 @@ user:
 - The exact `copy` directives you're proposing, one line of reasoning
   each.
 - The exact `container`/`container-file`/`container-port`/
-  `container-copy` directives you're proposing, and the full contents
-  of the Dockerfile you're proposing to write (or, if one already
-  exists at the target path, whether you're reusing it as-is or
-  changing it, and why) — including the Claude Code status hook files
-  from the Dockerfile section above, if the agent is Claude Code.
+  `container-copy`/`container-host-port` directives you're proposing,
+  and the full contents of the Dockerfile you're proposing to write
+  (or, if one already exists at the target path, whether you're
+  reusing it as-is or changing it, and why) — including the Claude Code
+  status hook files from the Dockerfile section above, if the agent is
+  Claude Code.
 - If you determined this repo can't reasonably be containerized, say
   so here explicitly, with your reasoning, instead of silently leaving
   the container directives out.
 - If the project depends on a backing service (database, etc.), state
   the limitation plainly: it needs to run natively on the host, shared
-  across worktrees, reachable via `host.docker.internal:<port>` — this
-  guide doesn't set that service up, only documents the pattern.
+  across worktrees, reachable via `host.docker.internal:<port>` (or, if
+  you're proposing `container-host-port`, transparently at `localhost`
+  instead) — this guide doesn't set that service up, only documents the
+  pattern.
 - Ask for confirmation, and answer any follow-up questions, before
   writing anything.
 

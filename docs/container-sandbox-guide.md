@@ -39,7 +39,7 @@ it into a container** — one container per worktree. Specifically:
   the agent is never given access to the Docker socket (that would be
   close to root-equivalent on the host and defeats the point).
 
-## The four directives
+## The five directives
 
 Add these to `.ruori.conf` at the main worktree's root (same
 file the `copy` directive already lives in — see
@@ -67,6 +67,20 @@ with none of these behaves exactly as it does today.
   even across `docker start`/`docker stop`. `<container-path>` defaults
   to the same path as `<host-path>` if omitted. A leading `~/` is
   expanded to your home directory.
+- **`container-host-port <port>`** — repeatable, one per host port a
+  process inside the container should be able to reach at
+  `localhost:<port>`, unmodified. `ruori` runs a `socat` relay inside
+  the container (`docker exec -d ... socat TCP-LISTEN:<port>,fork,reuseaddr
+  TCP:host.docker.internal:<port>`) so anything in the container dialing
+  `localhost:<port>` transparently reaches that port on the host,
+  instead of your app config having to be edited to say
+  `host.docker.internal` in container mode — see "Current limitation:
+  shared backing services" below for the motivating case. Requires
+  `socat` in the container image; if it's missing, `ruori` logs a
+  warning and skips that port rather than failing the whole container
+  start. Started fresh every time the container transitions to
+  running (a stopped container has no processes left inside it,
+  forwarders included), never persisted to a file.
 
 There is **no directive that launches an agent** — see "what container
 mode does and doesn't sandbox" above for why.
@@ -302,6 +316,7 @@ applies too — these are real, usable credentials once copied in.
 | `copy` | host → host | once, only if the target file doesn't already exist there | a plain file in the target **worktree** |
 | `container-port` | n/a (env injection) | fresh, every container start | an env var in the container process — **never written to any file** |
 | `container-copy` | host → container | once, only at container **creation** | a private, writable copy inside the container's own filesystem |
+| `container-host-port` | host → container (reverse of `container-port`) | fresh, every transition to running | a `socat` process inside the container — **never written to any file** |
 
 If your app reads its assigned port from a `.env` file rather than an
 env var, `container-port` alone won't get it there — write a small
@@ -322,6 +337,9 @@ needs:
 - Whatever you want auto-started (an agent, a dev server) — via your
   own `CMD`/`ENTRYPOINT`, or a tmux `default-command` set in a
   `~/.tmux.conf` baked into the image.
+- **`socat`** — only if you use `container-host-port` (above); ruori
+  warns and skips a port rather than failing the container start if
+  it's missing.
 
 It does **not** need: Docker itself (no Docker-in-Docker — the agent
 never gets to drive its own containers), or any host secret beyond
@@ -350,6 +368,16 @@ automatically, no extra container flags needed. `ruori` doesn't manage
 this dependency's lifecycle or isolate it per worktree at all; it's on
 you to start it once and leave it running.
 
+If you'd rather not edit copied `.env`/config values to say
+`host.docker.internal` at all (e.g. they're checked in as
+`localhost`-pointing templates, or several tools in the image assume
+`localhost`), add `container-host-port <port>` (see "The five
+directives" above) for each such port instead — `ruori` runs a `socat`
+relay inside the container so `localhost:<port>` there reaches the
+host transparently, and nothing needs editing. This still doesn't
+change the next paragraph's isolation gap; it only removes the
+`host.docker.internal` string-editing step.
+
 This is a known gap, not a deliberate design point like the
 Docker-in-Docker restriction itself: every worktree's dev container
 currently shares the *same* instance of whatever backing service you
@@ -358,6 +386,21 @@ database), with no per-worktree isolation. A cleaner fix — `ruori`
 itself (never the agent) orchestrating per-worktree sidecar
 containers via `docker compose`, on the host side where it already
 has Docker access — is a plausible follow-up, not built yet.
+
+Example: a project whose `compose.yaml` defines `mssql` (port 1433)
+and `redis` (port 6379), started natively on the host once
+(`docker compose up mssql redis -d`) and shared across every
+worktree's dev container:
+
+```
+container-host-port 1433
+container-host-port 6379
+```
+
+...plus `socat` installed in `container-file`'s Dockerfile. The app's
+existing `DATABASE_URL`/`REDIS_HOST` values pointing at `localhost` (or
+`127.0.0.1`) now work unmodified inside the container — no
+`host.docker.internal` edits needed.
 
 ## Worked example: a frontend + backend app
 
