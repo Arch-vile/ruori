@@ -18,17 +18,21 @@ itself. So Claude Code, a dev server, a build, a long-running script,
 etc. all keep running in the background; switching back to that
 worktree later reuses the same session right where you left it. If you
 want to actually stop something, kill its tmux session — either `tmux
-kill-session -t <name>` (see `ruori list` for session names), or Ctrl-X
-in the picker.
+kill-session -t <name>` (see `ruori list` for session names), or
+"kill tmux"/"stop container" from the picker's Enter action menu.
 
 (An earlier attempt at automatic periodic refresh was tried and
 reverted twice: killing/restarting fzf reset the cursor and search text
 on every refresh, and pushing a `reload` into the running fzf process —
-the same mechanism Ctrl-X already uses successfully — turned out to
-reset the cursor unpredictably in real use despite working correctly in
-every isolated test. Ctrl-R uses that same `reload` mechanism, just
-triggered deliberately instead of on a timer, which sidesteps whatever
-that race condition was.)
+the same in-place `reload` mechanism the picker's old Ctrl-X/Ctrl-D
+bindings used to use, before those actions moved into the Enter menu —
+turned out to reset the cursor unpredictably in real use despite
+working correctly in every isolated test. Ctrl-R still uses that same
+`reload` mechanism, just triggered deliberately instead of on a timer,
+which sidesteps whatever that race condition was; the Enter menu's
+delete/kill actions, by contrast, exit the picker and let the manager
+loop re-invoke fzf fresh next iteration, same as switching already
+does, so cursor/search state doesn't carry over across them.)
 
 ## `CLAUDE` busy/waiting/idle status
 
@@ -104,12 +108,12 @@ repo-wide `gh pr list` call: that needs a `--limit`, and on an active
 repo the most-recent-N PRs can already exclude an older worktree
 branch's PR entirely, silently showing "-" instead of e.g. "merged" for
 a perfectly real PR), plus one review-threads query per open, non-draft
-match to find unresolved comments. Redoing that on every Ctrl-R/Ctrl-X
-reload made the whole picker sluggish, so press **Ctrl-F** ("fetch")
-instead — one key refreshes both `PR` and `USAGE` (see below) rather
-than a separate refresh per column. Every other reload (Ctrl-R, Ctrl-X,
-Ctrl-D, looping back after a switch) reuses whatever Ctrl-F last
-fetched, cached on disk at
+match to find unresolved comments. Redoing that on every reload made
+the whole picker sluggish, so press **Ctrl-F** ("fetch") instead — one
+key refreshes both `PR` and `USAGE` (see below) rather than a separate
+refresh per column. Every other reload (Ctrl-R, and looping back after
+switching to/deleting/killing a worktree via the Enter menu) reuses
+whatever Ctrl-F last fetched, cached on disk at
 `<git-common-dir>/ruori/pr-status.cache` (shared by every worktree of
 the repo) so it survives across the `fzf reload`s each of those spawn
 as a fresh process. Until you press Ctrl-F at least once, `PR` shows

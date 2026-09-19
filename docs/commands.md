@@ -67,21 +67,24 @@ The row marked `*` is whichever worktree you last switched to —
 starting from the main worktree, by default, on a repo with no `ruori`
 history yet. This is persisted on disk
 (`<git-common-dir>/ruori/current-worktree`), so it carries over across
-separate runs of `ruori`. If that worktree gets deleted (`ruori rm`/Ctrl-D)
-it falls back to the main worktree. Distinct from `TMUX` = `active`,
-which just means a tmux session happens to be running there.
+separate runs of `ruori`. If that worktree gets deleted (`ruori rm`/the
+Enter menu's "delete worktree") it falls back to the main worktree.
+Distinct from `TMUX` = `active`, which just means a tmux session
+happens to be running there.
 
 Keybindings:
 
-- **Enter** — switch to the highlighted worktree (see above)
+- **Enter** — opens a small action menu on the highlighted worktree:
+  **switch to** (first, so it stays the fast path — see above),
+  **delete worktree** (see "Deleting a worktree" below), and **kill
+  tmux**/**stop container** (kills the tmux session, or in container
+  mode stops the container outright; the `TMUX`/Docker state updates on
+  the next picker reload, and switching to that row afterwards starts a
+  fresh session for it). Escaping the menu returns to the worktree
+  picker.
 - **Ctrl-N** — create a new worktree (prompts for a branch name, creates
   it, reloads the list) without activating it — see "Creating a
   worktree" below for why it stops there
-- **Ctrl-X** — kill the highlighted worktree's tmux session in place,
-  without leaving the picker; the `TMUX` column updates immediately,
-  and Enter on that row afterwards starts a fresh session for it
-- **Ctrl-D** — delete the highlighted worktree (see "Deleting a
-  worktree" below)
 - **Ctrl-R** — refresh `TMUX`/`CLAUDE` on demand (not automatic — see
   [dashboard-columns.md](dashboard-columns.md) for why)
 - **Ctrl-F** — fetch `PR` status and `USAGE` cost together (both are
@@ -135,7 +138,8 @@ Deletes a worktree and everything `ruori` itself created for it:
 Every step that can destroy work has its own `[y/N]` confirmation
 prompt; nothing happens silently. The main worktree (the repo root)
 can't be deleted this way — `ruori` refuses, same as `git worktree
-remove` would. Same as Ctrl-D on the highlighted row in the picker.
+remove` would. Same as picking "delete worktree" from the Enter menu
+on the highlighted row in the picker.
 
 ## `ruori details <branch-or-session>`
 

@@ -201,7 +201,8 @@ sort_worktrees_by_activation() {
 
 # --- parse `git worktree list --porcelain` into parallel arrays ---
 # A function (not inline top-level code) because the worktree list can now
-# change mid-session — `ruori rm`/Ctrl-D delete one — so the manager loop
+# change mid-session — `ruori rm`/the Enter menu's "delete worktree"
+# delete one — so the manager loop
 # re-parses on every iteration instead of trusting arrays built once at
 # startup, which would otherwise go stale and desync from what the picker
 # (each reload is its own fresh process, so it always sees current state)
@@ -524,8 +525,9 @@ container_exists() {
 
 # "running" / "stopped" / "none" for the container named $1 (the session
 # name — one container per worktree). Used by the picker's status column
-# and preview panel in container mode; ctrl-x there does `docker stop`,
-# so "stopped" is exactly what a picker refresh shows right after.
+# and preview panel in container mode; the Enter menu's "stop container"
+# does `docker stop`, so "stopped" is exactly what a picker refresh shows
+# right after.
 container_state_for() {
   if container_running "$1"; then
     echo "running"
@@ -675,8 +677,9 @@ allocate_port_for() {
 }
 
 # Strips every row for $1 (a session name) from the ports state file —
-# called from teardown (ruori rm / Ctrl-D) so freed ports aren't shown as
-# allocated by `ruori ports` or reused by a later, unrelated worktree.
+# called from teardown (`ruori rm` / the Enter menu's "delete worktree")
+# so freed ports aren't shown as allocated by `ruori ports` or reused by
+# a later, unrelated worktree.
 release_ports_for() {
   local session="$1" cache_file tmp
   cache_file="$(ports_cache_file)" || return 0
@@ -1310,17 +1313,18 @@ truncate_pad() {
 # claude-status<TAB>pr-status<TAB>usage-cost<TAB>branch<TAB>path<TAB>
 # session<TAB>raw-branch<TAB>image-info<TAB>ports-info. Only
 # marker/state/claude/pr/usage/branch are shown in the picker; the rest
-# are available to its preview window and ctrl-x/ctrl-d bindings via
-# fzf's {n} placeholders regardless of what --with-nth displays. Shared
-# by `ruori list`, the interactive picker, and the picker's own reload (so
-# a session killed via ctrl-x is reflected immediately).
+# are available to its preview window, and to the Enter action menu via
+# the selected row's own fields (see the manager loop below) regardless
+# of what --with-nth displays. Shared by `ruori list`, the interactive
+# picker, and the picker's own reload (so a session killed via the Enter
+# menu's "kill tmux"/"stop container" is reflected immediately).
 #
 # The state column (and header, see fzf_header_line) doubles as tmux
 # activity in normal mode and container state in container mode — a
 # session can only be "active" via `docker exec` into a running
 # container anyway, so container state is the more informative of the
-# two once containers are involved, and it's what ctrl-x's `docker stop`
-# there actually changes.
+# two once containers are involved, and it's what the Enter menu's
+# "stop container" there actually changes.
 fzf_line_for() {
   local i="$1" session active claude pr usage state image_info ports_info id_info
   session="$(session_name_for "${branches[$i]}" "${paths[$i]}")"
@@ -1748,7 +1752,7 @@ case "$cmd" in
       resources_entry "(none)" "Container mode is off for this repo, so ruori builds no image -- see the 'container' directive in $CONFIG_FILENAME to turn it on."
     fi
     resources_scope "Worktree"
-    resources_entry "$worktree_session" "Not a file, though 'tmux attach -t $worktree_session' works if you want to look. ruori creates this tmux session (or reuses it if already running) the moment you switch to this worktree; it keeps running in the background after you switch away, until 'ruori rm'/Ctrl-D kills it."
+    resources_entry "$worktree_session" "Not a file, though 'tmux attach -t $worktree_session' works if you want to look. ruori creates this tmux session (or reuses it if already running) the moment you switch to this worktree; it keeps running in the background after you switch away, until 'ruori rm' or the picker's Enter menu ('delete worktree' or 'kill tmux') kills it."
     if container_mode_enabled; then
       resources_entry "$worktree_session" "This worktree's Docker container -- same name as its tmux session above. Created by ruori the first time you switch to this worktree; stopped (not removed) when its tmux session is killed, and only actually removed by 'ruori rm'."
       resources_entry "(recorded in $common_dir/ruori/ports, once allocated)" "Not something you manage directly -- see 'ruori ports' for this worktree's live host-port mapping, if its container has started at least once. Allocated by ruori the first time this worktree's container starts, and freed when the worktree is removed."
@@ -1844,7 +1848,7 @@ case "$cmd" in
     ;;
   __fzfgen)
     # Hidden: invoked by the picker's own fzf `reload` binding (Ctrl-R,
-    # Ctrl-X, Ctrl-D), not a user-facing command. Loads the PR/usage
+    # Ctrl-N), not a user-facing command. Loads the PR/usage
     # *caches* only — never fetches from `gh` or scans ~/.claude/projects
     # — so this stays fast; Ctrl-F (__fzfgen_fetch, below) is the only
     # thing that does the slow fetch. Must emit the header line first,
@@ -1871,15 +1875,6 @@ case "$cmd" in
     for i in "${!paths[@]}"; do
       fzf_line_for "$i"
     done
-    exit 0
-    ;;
-  __delete_by_fields)
-    # Hidden: invoked only by the picker's Ctrl-D binding, with the
-    # highlighted row's path/raw-branch/session passed as args. fzf's
-    # `execute` (as opposed to `execute-silent`) suspends the picker and
-    # hands the terminal back for this, so delete_worktree's interactive
-    # confirmation prompts work normally.
-    delete_worktree "$2" "$3" "$4"
     exit 0
     ;;
   __new_prompt)
@@ -2107,8 +2102,9 @@ open_iterm_window_for() {
   # session_check_cmd mirrors tmux_has_session's own container/host
   # distinction, and is what tells a genuine attach failure apart from
   # the session/container simply having been torn down out from under
-  # this window (ctrl-x, ctrl-d/delete, `ruori rm`, or the session's last
-  # pane just exiting on its own) — see the generated script below.
+  # this window (the Enter menu's kill/stop or delete, `ruori rm`, or the
+  # session's last pane just exiting on its own) — see the generated
+  # script below.
   if [ "$use_container" = "1" ]; then
     attach_cmd="'$docker_bin' exec -it '$session' tmux attach -t '$session'"
     session_check_cmd="'$docker_bin' exec '$session' tmux has-session -t '$session'"
@@ -2163,8 +2159,9 @@ $attach_cmd
 ec=\$?
 if [ "\$ec" -ne 0 ] && $session_check_cmd >/dev/null 2>&1; then
   # The session/container is still there, so this wasn't just it being
-  # torn down (ctrl-x, ctrl-d/delete, \`ruori rm\`, or its last pane exiting
-  # on its own) — a real attach failure, worth pausing to read.
+  # torn down (the Enter menu's kill/stop or delete, \`ruori rm\`, or its
+  # last pane exiting on its own) — a real attach failure, worth pausing
+  # to read.
   echo
   echo "[ruori] tmux attach exited with code \$ec"
   echo "[ruori] press Enter to close this window"
@@ -2285,18 +2282,16 @@ activate_worktree() {
 # so this terminal stays the persistent manager. Esc/Ctrl-C in fzf exits.
 self_q="$(printf '%q' "$0")"
 
-# Ctrl-X's in-place kill: in container mode this stops the container
-# outright (not just the tmux session inside it) — the container can be
-# `docker start`ed again on the next switch, same as any other stopped
-# container, and it's what the state column then reports as "stopped".
-# Outside container mode there's no container to stop, so it falls back
-# to killing the tmux session on the host tmux server, as before.
+# The Enter action menu's "kill tmux"/"stop container" label: in
+# container mode it stops the container outright (not just the tmux
+# session inside it) — the container can be `docker start`ed again on
+# the next switch, same as any other stopped container, and it's what
+# the state column then reports as "stopped". Outside container mode
+# there's no container to stop, so it falls back to killing the tmux
+# session on the host tmux server, as before.
 ctrl_x_label="kill tmux"
 if [ "$CONTAINER_MODE" = "1" ]; then
-  ctrl_x_kill_cmd="${docker_bin} stop {9} 2>/dev/null"
   ctrl_x_label="stop container"
-else
-  ctrl_x_kill_cmd="${tmux_bin} kill-session -t {9} 2>/dev/null"
 fi
 
 # The preview panel's own field labels/order follow CONTAINER_MODE too:
@@ -2304,7 +2299,8 @@ fi
 # state line, and adds the image (built or not) and allocated host ports
 # (see container_id_for/container_image_info_for/container_ports_info_for
 # and their fields 13/11/12 from fzf_line_for) below it, since those are
-# exactly what ctrl-x/switching there actually change. No Session line:
+# exactly what the Enter menu's "stop container"/switching there
+# actually change. No Session line:
 # the container name doesn't add anything the id and branch don't already
 # say.
 if [ "$CONTAINER_MODE" = "1" ]; then
@@ -2329,9 +2325,9 @@ if [ -n "$pending_activate_path" ]; then
 fi
 
 while true; do
-  # Re-parse rather than trust arrays from a previous iteration: Ctrl-D in
-  # the picker below can delete a worktree mid-session, and the picker's
-  # own reloads (Ctrl-R/Ctrl-D/Ctrl-F) already always see current state
+  # Re-parse rather than trust arrays from a previous iteration: the
+  # Enter action menu below can delete a worktree mid-session, and the
+  # picker's own reloads (Ctrl-R/Ctrl-F) already always see current state
   # since each is a fresh process — this keeps the outer loop in sync too.
   parse_worktrees
   load_pr_status_cache
@@ -2344,12 +2340,10 @@ while true; do
   selection="$(printf '%s' "$fzf_input" | fzf \
     --delimiter='\t' --with-nth=2,3,4,5,6,7 --prompt="worktree > " --layout=reverse \
     --header-lines=1 \
-    --header="enter: switch · ctrl-n: new worktree · ctrl-x: ${ctrl_x_label} · ctrl-d: delete worktree · ctrl-r: refresh · ctrl-f: fetch PR/usage" \
+    --header="enter: actions · ctrl-n: new worktree · ctrl-r: refresh · ctrl-f: fetch PR/usage" \
     --preview "$fzf_preview_cmd" \
     --preview-window="bottom:${fzf_preview_lines}:wrap" \
     --bind "ctrl-n:execute(bash ${self_q} __new_prompt)+reload(bash ${self_q} __fzfgen)" \
-    --bind "ctrl-x:execute-silent(${ctrl_x_kill_cmd})+reload(bash ${self_q} __fzfgen)" \
-    --bind "ctrl-d:execute(bash ${self_q} __delete_by_fields {8} {10} {9})+reload(bash ${self_q} __fzfgen)" \
     --bind "ctrl-r:reload(bash ${self_q} __fzfgen)" \
     --bind "ctrl-f:reload(bash ${self_q} __fzfgen_fetch)")"
 
@@ -2360,13 +2354,44 @@ while true; do
   # Read straight off the selected row's own fields (path, session,
   # raw-branch) rather than looking `idx` up in the paths/branches arrays:
   # the row came from this iteration's parse_worktrees, so it's already
-  # authoritative, and Ctrl-D deleting a worktree mid-picker-session means
-  # an index-based lookup could otherwise point at a since-removed entry.
+  # authoritative, and the action menu below deleting a worktree
+  # mid-picker-session means an index-based lookup could otherwise point
+  # at a since-removed entry.
   selected_path="$(printf '%s' "$selection" | cut -f8)"
   session_name="$(printf '%s' "$selection" | cut -f9)"
   selected_branch="$(printf '%s' "$selection" | cut -f10)"
 
   log_iterm "switch selected: branch=${selected_branch} path=${selected_path} session=${session_name}"
 
-  activate_worktree "$selected_path" "$session_name" "$selected_branch"
+  # Enter no longer switches straight away: it opens a small action menu
+  # on the highlighted worktree, "switch to" first so it stays the fast
+  # path, followed by the other per-worktree actions — a place for those
+  # to live without each minting its own Ctrl-<letter> binding (see
+  # issue #11). This runs after the outer fzf above has already exited,
+  # so — unlike the old Ctrl-D/Ctrl-X bindings, which had to shell out via
+  # `execute` to get the suspended terminal back — it's plain bash with
+  # full access to activate_worktree/delete_worktree and the terminal.
+  menu_choice="$(printf '%s\n' "switch to" "delete worktree" "$ctrl_x_label" \
+    | fzf --prompt="action > " --header="${selected_branch}" --layout=reverse --no-preview)"
+
+  case "$menu_choice" in
+    "switch to")
+      activate_worktree "$selected_path" "$session_name" "$selected_branch"
+      ;;
+    "delete worktree")
+      delete_worktree "$selected_path" "$selected_branch" "$session_name"
+      ;;
+    "kill tmux"|"stop container")
+      if [ "$CONTAINER_MODE" = "1" ]; then
+        "$docker_bin" stop "$session_name" 2>/dev/null
+      else
+        "$tmux_bin" kill-session -t "$session_name" 2>/dev/null
+      fi
+      ;;
+    *)
+      # Esc/Ctrl-C on the action menu: no-op, loop back to the picker
+      # rather than exiting the manager loop (only Esc on the outer
+      # worktree picker above does that).
+      ;;
+  esac
 done
