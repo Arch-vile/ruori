@@ -26,7 +26,14 @@ it into a container** — one container per worktree. Specifically:
   in by default** — not `~/.claude`, not your shell config, not
   anything. Only what you explicitly list via `container-copy` (below)
   ever crosses into the container, and even that is a one-time,
-  disconnected copy, not a live link.
+  disconnected copy, not a live link. The one opt-in exception is
+  `container-volume` (below): a subpath you name gets its own
+  Docker-managed volume, living on the container's native storage
+  instead of the bind-mounted worktree — some tools' native binaries
+  (observed with a self-relaunching Go/Rust binary shipped as an npm
+  optional dependency) don't reliably survive being executed straight
+  off Docker Desktop's virtiofs bind mount, and this is the escape
+  hatch for that.
 - **`ruori` never decides what runs inside the container's tmux session.**
   It only creates a *bare* tmux session and attaches iTerm2 to it —
   no command is ever injected. Whatever starts (an agent, a plain
@@ -39,7 +46,7 @@ it into a container** — one container per worktree. Specifically:
   the agent is never given access to the Docker socket (that would be
   close to root-equivalent on the host and defeats the point).
 
-## The five directives
+## The six directives
 
 Add these to `.ruori.conf` at the main worktree's root (same
 file the `copy` directive already lives in — see
@@ -81,6 +88,21 @@ with none of these behaves exactly as it does today.
   start. Started fresh every time the container transitions to
   running (a stopped container has no processes left inside it,
   forwarders included), never persisted to a file.
+- **`container-volume <relative-path>`** — repeatable, one per subpath
+  (relative to the worktree root) that should live on the container's
+  own native Docker storage instead of the bind-mounted worktree — a
+  common case is `node_modules` in a Node.js repo, but the directive
+  itself doesn't know or care what the path is for. `ruori` adds an
+  extra `-v <volume>:<worktree-path>/<relative-path>` to the container's
+  `docker run`, shadowing just that subpath; everything else in the
+  worktree stays live-shared with the host exactly as without this
+  directive. The volume is created empty the first time the container
+  starts — run whatever populates that path (`pnpm install`, etc.)
+  *inside* the container afterward, same as you would without this
+  directive, since nothing is copied in from the host side. Only
+  actually removed by `ruori rm`, same as the container itself; `docker
+  start`/`docker stop` leaves it untouched. See "Directive comparison"
+  below for how this differs from `container-copy`.
 
 There is **no directive that launches an agent** — see "what container
 mode does and doesn't sandbox" above for why.
@@ -317,6 +339,14 @@ applies too — these are real, usable credentials once copied in.
 | `container-port` | n/a (env injection) | fresh, every container start | an env var in the container process — **never written to any file** |
 | `container-copy` | host → container | once, only at container **creation** | a private, writable copy inside the container's own filesystem |
 | `container-host-port` | host → container (reverse of `container-port`) | fresh, every transition to running | a `socat` process inside the container — **never written to any file** |
+| `container-volume` | n/a (storage swap, not a copy) | once, at container **creation** | that one subpath backed by a Docker volume on native storage — starts **empty**, never touches the host |
+
+`container-volume` looks similar to `container-copy` but does the
+opposite kind of thing: `container-copy` puts a host file's *contents*
+into the container once; `container-volume` gives an *empty* subpath
+its own storage and never reads anything from the host at all — you
+still populate it yourself from inside the container (e.g. `pnpm
+install`), same as you would without the directive.
 
 If your app reads its assigned port from a `.env` file rather than an
 env var, `container-port` alone won't get it there — write a small
