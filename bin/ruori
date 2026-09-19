@@ -1998,14 +1998,31 @@ iterm_window_state_file() {
 # would throw away real work. A pid mismatch therefore means "different
 # iTerm2, this id is meaningless" — see load_active_iterm_window_id.
 #
-# `pgrep -x` exits 1 (with no output) when it finds no match — a normal,
-# expected outcome here, not a failure, so callers can tell "not running"
-# apart from "running". Under the script's `set -e`, an unguarded
-# pipeline would instead kill the whole manager loop the instant iTerm2
-# wasn't found, with zero output to explain why, so `|| true` keeps that
-# outcome from propagating as this function's own exit status.
+# Deliberately not `pgrep -x iTerm2`: `-x` requires an exact match against
+# the process's reported command name, but on at least one real setup (an
+# iTerm2 install under `~/Applications` rather than `/Applications`) macOS
+# reports that name as the full executable path rather than the bare
+# `iTerm2`, so `-x iTerm2` silently never matches. The practical effect
+# was total, permanent breakage: every save wrote an empty pid field,
+# every subsequent load treated that as "iTerm2 is not running", and
+# `load_active_iterm_window_id` discarded the tracked window on every
+# single switch from then on — see docs/troubleshooting.md's "leftover
+# iTerm2 windows" for how this actually presented (old windows piling up
+# instead of being replaced). `ps` matching the trailing path component
+# instead of demanding an exact name tolerates both a bare `iTerm2` comm
+# and a full-path one.
+#
+# No match (iTerm2 not running, or nothing found) is a normal, expected
+# outcome here, not a failure, so callers can tell "not running" apart
+# from "running". Under the script's `set -e`, an unguarded pipeline
+# would instead kill the whole manager loop the instant iTerm2 wasn't
+# found, with zero output to explain why, so `|| true` keeps that outcome
+# from propagating as this function's own exit status.
 iterm_pid() {
-  pgrep -x iTerm2 2>/dev/null | head -n 1 || true
+  ps -axo pid=,comm= 2>/dev/null | awk '
+    { pid = $1; $1 = ""; sub(/^ /, ""); comm = $0 }
+    comm == "iTerm2" || comm ~ /\/iTerm2$/ { print pid; exit }
+  ' || true
 }
 
 save_active_iterm_window_id() {
