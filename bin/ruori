@@ -319,7 +319,7 @@ config_directives() {
 # each new accessor (container_mode_enabled, container_file_path,
 # container_ports, container_copy_entries) matches only its own key(s),
 # so this is the single shared place unrecognized keys get flagged.
-KNOWN_CONFIG_DIRECTIVES="copy container container-file container-port container-copy container-host-port"
+KNOWN_CONFIG_DIRECTIVES="copy container container-file container-port container-copy container-host-port container-volume"
 
 warn_unknown_directives() {
   local key value known k
@@ -441,6 +441,35 @@ container_host_ports() {
     [ -n "$value" ] || continue
     printf '%s\n' "$value"
   done < <(config_directives)
+}
+
+# One "<relative-path>" line per `container-volume <relative-path>`
+# directive, in config order. <relative-path> (relative to the worktree
+# root) gets its own Docker-managed volume instead of living on the
+# bind-mounted worktree — see container_volume_name_for and the extra
+# `docker run -v` flag it feeds in container_start_if_needed. Opt-in,
+# repo-specific: this directive carries no assumption about what the
+# path is for (a repo's own node_modules being the motivating case is
+# incidental, not something this accessor or its caller know about).
+container_native_volumes() {
+  local key value
+  while IFS=$'\t' read -r key value; do
+    [ "$key" = "container-volume" ] || continue
+    [ -n "$value" ] || continue
+    printf '%s\n' "$value"
+  done < <(config_directives)
+}
+
+# Deterministic per-(worktree, subpath) Docker volume name for a
+# `container-volume` entry — no cache file needed (unlike ports, which
+# need one specifically because free-port scanning is non-deterministic;
+# a volume name has no such collision to resolve). Also the name prefix
+# ("$session__vol-") that delete_worktree/resources later query by, so
+# cleanup/listing works even if the directive that created a volume has
+# since been edited or removed from .ruori.conf.
+container_volume_name_for() {
+  local session="$1" relpath="$2"
+  printf '%s__vol-%s' "$session" "$(sanitize "$relpath")"
 }
 
 # Copy any files matching the configured patterns (see copy_patterns/
@@ -718,7 +747,9 @@ container_start_host_port_forwards() {
 # then `docker run -d ... sleep infinity` (a durable PID 1; tmux
 # sessions live inside via `docker exec`, never as the container's main
 # process) with the worktree + git common dir bind-mounted at matching
-# host paths and one -p/-e pair per configured container-port. Copy-in
+# host paths, one -v per configured container-volume shadowing a subpath
+# of the worktree mount with its own native Docker volume, and one -p/-e
+# pair per configured container-port. Copy-in
 # (container-copy) only ever runs in the "container just created"
 # branch — a stopped-then-restarted container is never re-copied into,
 # which is what makes "delete the container to refresh its copied
@@ -754,6 +785,20 @@ container_start_if_needed() {
     port_flags+=(-p "127.0.0.1:${host_port}:${container_port}" -e "${env_name}=${host_port}")
   done < <(container_ports)
 
+  # One -v flag per `container-volume` directive, shadowing that
+  # subpath of the worktree bind mount below with a Docker-managed
+  # volume on the container's own native storage -- Docker layers a
+  # more-specific mount over a broader one regardless of flag order, so
+  # this works whether it's listed before or after "-v $path:$path".
+  # See container_volume_name_for for the naming scheme.
+  local -a native_volume_flags=()
+  local relpath volname
+  while IFS= read -r relpath; do
+    [ -n "$relpath" ] || continue
+    volname="$(container_volume_name_for "$name" "$relpath")"
+    native_volume_flags+=(-v "$volname:$path/$relpath")
+  done < <(container_native_volumes)
+
   # RUORI_SHARED_DIR tells the image's own entrypoint/Dockerfile where
   # this repo's shared, writable, cross-worktree storage lives inside
   # the container -- today that's a subdirectory of the common git dir
@@ -771,6 +816,7 @@ container_start_if_needed() {
   docker run -d --name "$name" \
     -v "$path:$path" \
     -v "$common_dir:$common_dir" \
+    "${native_volume_flags[@]}" \
     -e "RUORI_SHARED_DIR=$common_dir/ruori/shared" \
     "${port_flags[@]}" \
     "$(container_image_for)" sleep infinity >/dev/null
@@ -1401,6 +1447,16 @@ delete_worktree() {
   if [ "$CONTAINER_MODE" = "1" ]; then
     docker rm -f "$session" 2>/dev/null || true
     release_ports_for "$session"
+    # By name prefix, not by re-reading the current container-volume
+    # directives -- a volume created under a directive since edited or
+    # removed from .ruori.conf still gets cleaned up here, same as
+    # `docker rm -f` above doesn't care whether "container on" is still
+    # set.
+    local vol
+    while IFS= read -r vol; do
+      [ -n "$vol" ] || continue
+      docker volume rm "$vol" 2>/dev/null || true
+    done < <(docker volume ls -q --filter "name=^${session}__vol-" 2>/dev/null)
   fi
 
   local rm_err
@@ -1752,6 +1808,13 @@ case "$cmd" in
     if container_mode_enabled; then
       resources_entry "$worktree_session" "This worktree's Docker container -- same name as its tmux session above. Created by ruori the first time you switch to this worktree; stopped (not removed) when its tmux session is killed, and only actually removed by 'ruori rm'."
       resources_entry "(recorded in $common_dir/ruori/ports, once allocated)" "Not something you manage directly -- see 'ruori ports' for this worktree's live host-port mapping, if its container has started at least once. Allocated by ruori the first time this worktree's container starts, and freed when the worktree is removed."
+      native_volumes="$(docker volume ls -q --filter "name=^${worktree_session}__vol-" 2>/dev/null)"
+      if [ -n "$native_volumes" ]; then
+        while IFS= read -r native_volume; do
+          [ -n "$native_volume" ] || continue
+          resources_entry "$native_volume" "Not a file -- a Docker-managed volume (not the worktree's own filesystem) shadowing one subpath of this worktree inside the container, per a 'container-volume' directive in $CONFIG_FILENAME (see docs/container-sandbox-guide.md). Created the first time this worktree's container starts; only actually removed by 'ruori rm', same as the container itself -- queried here by name, not by re-reading the current directive, so it's still listed even if that directive has since been edited or removed."
+        done <<<"$native_volumes"
+      fi
       if [ -n "$(container_host_ports)" ]; then
         resources_entry "socat process(es) inside $worktree_session" "Not a file -- one background 'socat' process per configured container-host-port, running inside this worktree's container, relaying localhost:<port> there to host.docker.internal:<port> on the host (see the 'container-host-port' directive in $CONFIG_FILENAME and docs/container-sandbox-guide.md). Started by ruori via 'docker exec -d' every time the container transitions to running -- 'docker stop' kills these along with everything else in the container, so they're never persisted or tracked in a file."
       fi
