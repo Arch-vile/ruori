@@ -86,11 +86,12 @@ Keybindings:
   clickable `http://localhost:<host-port>` link per such port rather
   than launching a browser itself, and waits for Enter before
   returning to the picker so the link doesn't scroll away unread),
-  **kill tmux**/**stop container** (kills the tmux session, or in
-  container mode stops the container outright; the `TMUX`/Docker state
-  updates on the next picker reload, and switching to that row
-  afterwards starts a fresh session for it), and **back**. Esc/Ctrl-C
-  on the menu does the same as picking "back" — both return to the
+  **rebuild container** (container mode only — see "`ruori rebuild
+  <branch>`" below), **kill tmux**/**stop container** (kills the tmux
+  session, or in container mode stops the container outright; the
+  `TMUX`/Docker state updates on the next picker reload, and switching
+  to that row afterwards starts a fresh session for it), and **back**.
+  Esc/Ctrl-C on the menu does the same as picking "back" — both return to the
   worktree picker rather than exiting `ruori`.
 - **Ctrl-N** — create a new worktree (prompts for a branch name, creates
   it, reloads the list) without activating it — see "Creating a
@@ -150,6 +151,27 @@ prompt; nothing happens silently. The main worktree (the repo root)
 can't be deleted this way — `ruori` refuses, same as `git worktree
 remove` would. Same as picking "delete worktree" from the Enter menu
 on the highlighted row in the picker.
+
+## `ruori rebuild <branch>`
+
+Container mode only — deletes and recreates the container for that
+worktree: `docker rm -f` followed by the same build/`docker
+run`/container-copy sequence a fresh `switch` to that worktree would
+trigger. Use this to pick up a Dockerfile change or refresh a stale
+`container-copy`'d file (env files copied in on container creation are
+never re-copied into an already-running container — see
+[container-sandbox-guide.md](container-sandbox-guide.md)).
+
+- Allocated host ports (`ruori ports`) are kept, not reassigned, so
+  anything pointing at the old port mapping keeps working.
+- Any `container-volume` native volumes are left alone — only the
+  container object itself is disposable here; volume data survives a
+  rebuild the same way it survives a plain restart.
+- Confirms interactively first (`[y/N]`), since it discards whatever
+  state lived only inside the old container.
+
+Same as picking "rebuild container" from the Enter menu on the
+highlighted row in the picker.
 
 ## `ruori details <branch-or-session>`
 

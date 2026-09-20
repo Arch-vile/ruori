@@ -923,6 +923,37 @@ container_start_if_needed() {
   done < <(container_copy_entries)
 }
 
+# Deletes and recreates the container for session $1 rooted at worktree
+# path $2 (see issue #12) — `docker rm -f` followed by
+# container_start_if_needed, whose "container just created" branch
+# re-runs `docker build` (picking up any Dockerfile change via Docker's
+# own layer cache) and container-copy. That's the "delete the container
+# to refresh its copied config" action container_start_if_needed's own
+# comment already calls out, just as a command instead of a manual
+# `docker rm -f`. Doesn't touch allocate_port_for's cache (so a rebuilt
+# container keeps the same host port mappings) or any container-volume
+# native volumes (data there survives, same as a plain `docker start`
+# would leave it) — only the container object itself is disposable
+# here; see delete_worktree for the full-teardown path that does remove
+# ports/volumes. Confirms interactively first, like delete_worktree,
+# since it discards whatever state lived only inside the old container.
+rebuild_container_for() {
+  local session="$1" path="$2" confirm
+  echo "About to rebuild container:"
+  echo "  session: $session"
+  echo "  this deletes the existing container and recreates it (image"
+  echo "  rebuild + container-copy); ports and container-volume data are"
+  echo "  kept."
+  read -r -p "Rebuild this container? [y/N] " confirm
+  case "$confirm" in
+    y|Y|yes|YES) ;;
+    *) echo "ruori: aborted, container not rebuilt"; return 1 ;;
+  esac
+
+  docker rm -f "$session" >/dev/null 2>&1 || true
+  container_start_if_needed "$session" "$path"
+}
+
 # True if a tmux session named $2 exists — checked inside the named
 # container via `docker exec` when $1 (use_container) is "1", or on the
 # host tmux server directly (today's behavior) otherwise. Container mode
@@ -1943,6 +1974,31 @@ case "$cmd" in
     delete_worktree "${paths[$found]}" "${branches[$found]}" "$session_name"
     exit $?
     ;;
+  rebuild)
+    branch_arg="${2:-}"
+    if [ -z "$branch_arg" ]; then
+      echo "ruori: usage: ruori rebuild <branch>" >&2
+      exit 1
+    fi
+    if [ "$CONTAINER_MODE" != "1" ]; then
+      echo "ruori: 'rebuild' only applies in container mode (see 'container on' in ${CONFIG_FILENAME})" >&2
+      exit 1
+    fi
+    found=-1
+    for i in "${!paths[@]}"; do
+      if [ "${branches[$i]}" = "$branch_arg" ]; then
+        found=$i
+        break
+      fi
+    done
+    if [ "$found" -lt 0 ]; then
+      echo "ruori: no worktree found for branch '$branch_arg' (see 'ruori list')" >&2
+      exit 1
+    fi
+    session_name="$(session_name_for "${branches[$found]}" "${paths[$found]}")"
+    rebuild_container_for "$session_name" "${paths[$found]}"
+    exit $?
+    ;;
   details)
     # Accepts either the branch name or the tmux/container session name
     # (the latter being what the picker's preview panel and `ruori list`'s
@@ -2542,8 +2598,11 @@ while true; do
   # with no ":http" ports, or a worktree whose container has never
   # started (nothing allocated yet).
   menu_items=("switch to" "delete worktree")
-  if [ "$CONTAINER_MODE" = "1" ] && [ -n "$(browser_links_for "$session_name")" ]; then
-    menu_items+=("open in browser")
+  if [ "$CONTAINER_MODE" = "1" ]; then
+    if [ -n "$(browser_links_for "$session_name")" ]; then
+      menu_items+=("open in browser")
+    fi
+    menu_items+=("rebuild container")
   fi
   menu_items+=("$ctrl_x_label" "back")
 
@@ -2569,6 +2628,9 @@ while true; do
         printf '%s: %s\n' "$link_label" "$(osc8_link "$link_url")"
       done < <(browser_links_for "$session_name")
       read -r -p "Press Enter to continue..." _ || true
+      ;;
+    "rebuild container")
+      rebuild_container_for "$session_name" "$selected_path" || true
       ;;
     "kill tmux"|"stop container")
       if [ "$CONTAINER_MODE" = "1" ]; then
