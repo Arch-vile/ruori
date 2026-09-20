@@ -40,12 +40,10 @@ tmux_bin="$(command -v tmux)"
 # then.
 docker_bin="$(command -v docker || true)"
 
-if ! git rev-parse --show-toplevel >/dev/null 2>&1; then
+if ! repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
   echo "ruori: not inside a git repository" >&2
   exit 1
 fi
-
-repo_root="$(git rev-parse --show-toplevel)"
 repo_name="$(basename "$repo_root")"
 
 # Default "current worktree" for the picker's marker column (see
@@ -65,15 +63,41 @@ current_worktree_path="$repo_root"
 # below, where it conceptually belongs) because several state-file
 # functions need it long before that section is reached, and bash only
 # knows a function once it's read past its own definition.
+#
+# Memoized in _git_common_dir_cache: this is a fixed property of
+# $repo_root, which never changes for the life of the process, but
+# nearly every cache-file accessor and every log_file_read/write call
+# goes through here — without caching, a single cold start fires a
+# dozen-plus redundant `git rev-parse --git-common-dir` subprocesses.
+# Every caller invokes this through `$(...)`/`<(...)`, which bash always
+# runs in a forked subshell — so a cache write made *inside* the
+# function body, on a call made that way, never survives back to this
+# process; it would silently re-run the git subprocess on every call
+# despite the cache. The `git_common_dir_prime` call right after this
+# definition runs the function directly (not through a subshell),
+# populating _git_common_dir_cache once in this process itself; every
+# later `$(git_common_dir)` call then just reads and prints that
+# already-known value from its own throwaway subshell instead of
+# spawning git again.
+_git_common_dir_cache=""
 git_common_dir() {
+  if [ -n "$_git_common_dir_cache" ]; then
+    printf '%s' "$_git_common_dir_cache"
+    return 0
+  fi
   local common_dir
   common_dir="$(cd "$repo_root" && git rev-parse --git-common-dir 2>/dev/null)" || return 1
   case "$common_dir" in
     /*) ;;
     *) common_dir="$repo_root/$common_dir" ;;
   esac
+  _git_common_dir_cache="$common_dir"
   printf '%s' "$common_dir"
 }
+git_common_dir_prime() {
+  git_common_dir >/dev/null 2>&1 || true
+}
+git_common_dir_prime
 
 # Every piece of ruori's own per-repo state (activation times, current-
 # worktree, PR/usage caches, iTerm tracking, port allocations, and any
@@ -299,20 +323,47 @@ CONFIG_FILENAME=".ruori.conf"
 # Emits "<directive>\t<value>" for each config line, trimmed and with
 # comments stripped. If the config file doesn't exist, emits nothing —
 # callers apply their own defaults in that case.
+#
+# Memoized in _config_directives_cache: ruori never writes this file
+# itself (see comment above), so it's a fixed input for the life of the
+# process — but nearly a dozen accessors (copy_patterns,
+# container_mode_enabled, container_file_path, container_ports, ...)
+# each call this, and in container mode some of those run again per
+# worktree row on every picker draw. Without caching that's a full
+# re-read-and-reparse of the file per call instead of once per process.
+# Every caller invokes this through `$(...)`/`<(...)` (a forked
+# subshell), so — same reasoning as git_common_dir_prime above — a
+# cache write made inside one of those calls never survives back to
+# this process; config_directives_prime right below runs the function
+# directly once, so every later subshelled call just reads the
+# already-populated cache instead of re-reading the file.
+_config_directives_cache=""
+_config_directives_cache_loaded=0
 config_directives() {
+  if [ "$_config_directives_cache_loaded" -eq 1 ]; then
+    [ -n "$_config_directives_cache" ] && printf '%s' "$_config_directives_cache"
+    return 0
+  fi
+  _config_directives_cache_loaded=1
   local config_file="$main_worktree_path/$CONFIG_FILENAME"
   [ -f "$config_file" ] || return 0
   log_file_read "$config_file"
-  local line key value
+  local line key value out=""
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%%#*}"
     line="${line#"${line%%[![:space:]]*}"}"   # trim leading whitespace
     line="${line%"${line##*[![:space:]]}"}"   # trim trailing whitespace
     [ -n "$line" ] || continue
     read -r key value <<<"$line"
-    printf '%s\t%s\n' "$key" "$value"
+    out+="$key"$'\t'"$value"$'\n'
   done <"$config_file"
+  _config_directives_cache="$out"
+  printf '%s' "$out"
 }
+config_directives_prime() {
+  config_directives >/dev/null 2>&1 || true
+}
+config_directives_prime
 
 # All directive keys any accessor below understands. Checked once here
 # (warn_unknown_directives) rather than in copy_patterns itself, since
@@ -566,38 +617,97 @@ container_exists() {
   docker inspect "$1" >/dev/null 2>&1
 }
 
+# Bulk state/id lookup for every container in one `docker ps` call,
+# populated once per picker draw (see call sites in the __fzfgen/
+# __fzfgen_fetch/manager-loop bodies below) rather than doing a
+# `docker inspect` round-trip per worktree row: on a repo with many
+# worktrees, each individual round-trip to the Docker daemon adds real
+# wall-clock time (Docker Desktop's gRPC boundary is not cheap per
+# call), and this is the one part of a picker draw whose cost scales
+# with worktree count. `docker ps -a` state values are "created",
+# "running", "paused", "restarting", "removing", "exited", or "dead" —
+# container_state_for below only distinguishes "running" from anything
+# else that exists, matching its pre-existing running/stopped/none
+# contract.
+declare -A _docker_state_by_name=()
+declare -A _docker_id_by_name=()
+_docker_table_loaded=0
+refresh_docker_container_table() {
+  _docker_state_by_name=()
+  _docker_id_by_name=()
+  local name state id
+  while IFS=$'\t' read -r name state id; do
+    [ -n "$name" ] || continue
+    _docker_state_by_name["$name"]="$state"
+    _docker_id_by_name["$name"]="$id"
+  done < <(docker ps -a --format '{{.Names}}\t{{.State}}\t{{.ID}}' 2>/dev/null)
+  _docker_table_loaded=1
+}
+
 # "running" / "stopped" / "none" for the container named $1 (the session
 # name — one container per worktree). Used by the picker's status column
 # and preview panel in container mode; the Enter menu's "stop container"
 # does `docker stop`, so "stopped" is exactly what a picker refresh shows
-# right after.
+# right after. Reads from the bulk table above when a draw has populated
+# it; falls back to a single `docker inspect` call otherwise (e.g. the
+# Enter action menu's one-off preview, which never loops over every
+# worktree so doesn't bother refreshing the table).
 container_state_for() {
-  if container_running "$1"; then
+  local session="$1"
+  if [ "$_docker_table_loaded" = "1" ]; then
+    local st="${_docker_state_by_name[$session]:-}"
+    if [ -z "$st" ]; then
+      echo "none"
+    elif [ "$st" = "running" ]; then
+      echo "running"
+    else
+      echo "stopped"
+    fi
+    return
+  fi
+  local running
+  running="$(docker inspect -f '{{.State.Running}}' "$session" 2>/dev/null)" || { echo "none"; return; }
+  if [ "$running" = "true" ]; then
     echo "running"
-  elif container_exists "$1"; then
-    echo "stopped"
   else
-    echo "none"
+    echo "stopped"
   fi
 }
 
 # One repo-wide image (see container_image_for), so this is the same for
-# every row in the picker — called once per draw, not per worktree.
+# every row in the picker. Memoized in _container_image_info_cache: the
+# comment above already documented the intent ("called once per draw,
+# not per worktree"), but the picker's per-row loop (fzf_line_for)
+# called this once per worktree anyway, each doing its own redundant
+# `docker image inspect` — this cache makes the code match the intent.
+_container_image_info_cache=""
+_container_image_info_cache_loaded=0
 container_image_info_for() {
+  if [ "$_container_image_info_cache_loaded" -eq 1 ]; then
+    printf '%s' "$_container_image_info_cache"
+    return 0
+  fi
+  _container_image_info_cache_loaded=1
   local image
   image="$(container_image_for)"
   if docker image inspect "$image" >/dev/null 2>&1; then
-    printf '%s (built)' "$image"
+    _container_image_info_cache="$image (built)"
   else
-    printf '%s (not built)' "$image"
+    _container_image_info_cache="$image (not built)"
   fi
+  printf '%s' "$_container_image_info_cache"
 }
 
 # Short (12-char) container id for session $1, or "-" if the container
-# doesn't exist yet. Shown next to the container name in the preview panel.
+# doesn't exist yet. Shown next to the container name in the preview
+# panel. Same bulk-table/fallback split as container_state_for above.
 container_id_for() {
-  local id
-  id="$(docker inspect -f '{{.Id}}' "$1" 2>/dev/null)"
+  local session="$1" id
+  if [ "$_docker_table_loaded" = "1" ]; then
+    id="${_docker_id_by_name[$session]:-}"
+  else
+    id="$(docker inspect -f '{{.Id}}' "$session" 2>/dev/null)"
+  fi
   if [ -n "$id" ]; then
     printf '%s' "${id:0:12}"
   else
@@ -1477,28 +1587,40 @@ truncate_pad() {
 fzf_line_for() {
   local i="$1" session active claude pr usage state image_info ports_info id_info url_info
   session="$(session_name_for "${branches[$i]}" "${paths[$i]}")"
-  if tmux_has_session "$CONTAINER_MODE" "$session"; then
-    active="active"
-    claude="$(claude_status_for "${paths[$i]}")"
-  else
-    active="-"
-    claude="-"
-  fi
-  pr="$(pr_status_for "${branches[$i]}")"
-  usage="$(usage_cost_for "${paths[$i]}")"
   if [ "$CONTAINER_MODE" = "1" ]; then
+    # container_state_for first: a stopped/never-created container can't
+    # have a tmux session inside it, so `docker exec ... tmux
+    # has-session` (tmux_has_session's container-mode path) would just
+    # fail anyway — skip that extra round-trip to the Docker daemon
+    # unless the container is actually running.
     state="$(container_state_for "$session")"
+    if [ "$state" = "running" ] && tmux_has_session "$CONTAINER_MODE" "$session"; then
+      active="active"
+      claude="$(claude_status_for "${paths[$i]}")"
+    else
+      active="-"
+      claude="-"
+    fi
     image_info="$(container_image_info_for)"
     ports_info="$(container_ports_info_for "$session")"
     id_info="$(container_id_for "$session")"
     url_info="$(browser_links_summary_for "$session")"
   else
+    if tmux_has_session "$CONTAINER_MODE" "$session"; then
+      active="active"
+      claude="$(claude_status_for "${paths[$i]}")"
+    else
+      active="-"
+      claude="-"
+    fi
     state="$active"
     image_info="-"
     ports_info="-"
     id_info="-"
     url_info="-"
   fi
+  pr="$(pr_status_for "${branches[$i]}")"
+  usage="$(usage_cost_for "${paths[$i]}")"
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$i" \
     "$(marker_for "${paths[$i]}")" \
@@ -1680,6 +1802,12 @@ warn_unknown_directives
 CONTAINER_MODE=0
 container_mode_enabled && CONTAINER_MODE=1
 [ "$CONTAINER_MODE" = "1" ] && require_docker_if_container_mode
+
+# Primes _container_image_info_cache in this process (not a subshell —
+# same reasoning as git_common_dir_prime/config_directives_prime
+# above), since every caller in fzf_line_for's per-worktree-row loop
+# invokes container_image_info_for through `$(...)`.
+[ "$CONTAINER_MODE" = "1" ] && { container_image_info_for >/dev/null 2>&1 || true; }
 
 # --host-mode-fine: a one-time, per-repo way to permanently silence the
 # "container mode is off" nudge further below, for a user who's
@@ -2062,6 +2190,7 @@ case "$cmd" in
     # would make the first real row disappear into the header slot.
     load_pr_status_cache
     load_usage_cost_cache
+    [ "$CONTAINER_MODE" = "1" ] && refresh_docker_container_table
     fzf_header_line
     for i in "${!paths[@]}"; do
       fzf_line_for "$i"
@@ -2076,6 +2205,7 @@ case "$cmd" in
     # having a separate refresh key per slow column.
     fetch_pr_statuses
     fetch_usage_costs
+    [ "$CONTAINER_MODE" = "1" ] && refresh_docker_container_table
     fzf_header_line
     for i in "${!paths[@]}"; do
       fzf_line_for "$i"
@@ -2538,6 +2668,7 @@ while true; do
   parse_worktrees
   load_pr_status_cache
   load_usage_cost_cache
+  [ "$CONTAINER_MODE" = "1" ] && refresh_docker_container_table
   fzf_input="$(fzf_header_line)"$'\n'
   for i in "${!paths[@]}"; do
     fzf_input+="$(fzf_line_for "$i")"$'\n'
