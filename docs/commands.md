@@ -74,14 +74,17 @@ happens to be running there.
 
 Keybindings:
 
-- **Enter** — opens a small action menu on the highlighted worktree:
-  **switch to** (first, so it stays the fast path — see above),
-  **delete worktree** (see "Deleting a worktree" below), and **kill
-  tmux**/**stop container** (kills the tmux session, or in container
-  mode stops the container outright; the `TMUX`/Docker state updates on
-  the next picker reload, and switching to that row afterwards starts a
-  fresh session for it). Escaping the menu returns to the worktree
-  picker.
+- **Enter** — opens a small action menu on the highlighted worktree,
+  with that same row's detail (branch, tmux/Docker state, Claude
+  status, PR, usage, path, session) shown in a preview pane underneath
+  it, same as the picker's own preview. Items: **switch to** (first, so
+  it stays the fast path — see above), **delete worktree** (see
+  "Deleting a worktree" below), **kill tmux**/**stop container** (kills
+  the tmux session, or in container mode stops the container outright;
+  the `TMUX`/Docker state updates on the next picker reload, and
+  switching to that row afterwards starts a fresh session for it), and
+  **back**. Esc/Ctrl-C on the menu does the same as picking "back" —
+  both return to the worktree picker rather than exiting `ruori`.
 - **Ctrl-N** — create a new worktree (prompts for a branch name, creates
   it, reloads the list) without activating it — see "Creating a
   worktree" below for why it stops there

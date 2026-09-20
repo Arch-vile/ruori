@@ -2371,8 +2371,30 @@ while true; do
   # so — unlike the old Ctrl-D/Ctrl-X bindings, which had to shell out via
   # `execute` to get the suspended terminal back — it's plain bash with
   # full access to activate_worktree/delete_worktree and the terminal.
-  menu_choice="$(printf '%s\n' "switch to" "delete worktree" "$ctrl_x_label" \
-    | fzf --prompt="action > " --header="${selected_branch}" --layout=reverse --no-preview)"
+  #
+  # The preview below reuses the exact same layout as the outer picker's
+  # own preview pane for this row, just resolved from the already-cut
+  # $selection instead of fzf's {n} placeholders — the menu's own rows
+  # ("switch to", "delete worktree", ...) carry no such fields for a
+  # placeholder to refer to. Exported (not just a local var) because
+  # fzf's --preview runs it in a separate spawned shell that doesn't see
+  # this script's own variables otherwise; unset right after so it
+  # doesn't linger for anything spawned later.
+  if [ "$CONTAINER_MODE" = "1" ]; then
+    export RUORI_MENU_PREVIEW="$(printf '%s' "$selection" | awk -F'\t' '{printf "Branch:  %s\nDocker:  %s (container %s)\nImage:   %s\nPorts:   %s\nCLAUDE:  %s\nPR:      %s\nUSAGE:   %s\nPath:    %s\n", $10, $3, $13, $11, $12, $4, $5, $6, $8}')"
+  else
+    export RUORI_MENU_PREVIEW="$(printf '%s' "$selection" | awk -F'\t' '{printf "Branch:  %s\nTMUX:    %s\nCLAUDE:  %s\nPR:      %s\nUSAGE:   %s\nPath:    %s\nSession: %s\n", $10, $3, $4, $5, $6, $8, $9}')"
+  fi
+
+  # `|| true`: fzf exits non-zero on Esc/Ctrl-C, which under this
+  # script's `set -e` would otherwise kill the whole manager loop right
+  # here instead of just falling through to the no-op case below and
+  # looping back to the worktree picker.
+  menu_choice="$(printf '%s\n' "switch to" "delete worktree" "$ctrl_x_label" "back" \
+    | fzf --prompt="action > " --header="${selected_branch} · esc: back to worktree list" --layout=reverse \
+      --preview 'printf "%s" "$RUORI_MENU_PREVIEW"' \
+      --preview-window="bottom:${fzf_preview_lines}:wrap")" || true
+  unset RUORI_MENU_PREVIEW
 
   case "$menu_choice" in
     "switch to")
@@ -2389,9 +2411,9 @@ while true; do
       fi
       ;;
     *)
-      # Esc/Ctrl-C on the action menu: no-op, loop back to the picker
-      # rather than exiting the manager loop (only Esc on the outer
-      # worktree picker above does that).
+      # "back", Esc, or Ctrl-C on the action menu: no-op, loop back to
+      # the picker rather than exiting the manager loop (only Esc on the
+      # outer worktree picker above does that).
       ;;
   esac
 done
