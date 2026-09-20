@@ -331,6 +331,41 @@ re-`gh auth login` an identity, `docker rm -f` the affected
 container(s) so `ruori` re-copies it fresh. The same security note
 applies too — these are real, usable credentials once copied in.
 
+## Recipe: `container-port` published but connection refused from the host
+
+Symptom: `docker ps` shows the expected `127.0.0.1:<host>-><container>/tcp`
+mapping, `ruori ports` shows the right host port, but a browser or
+`curl http://localhost:<host-port>` from the host gets connection
+refused — even though `curl http://localhost:<container-port>` from
+*inside* the container (via `docker exec`) succeeds.
+
+The giveaway is in that inside-the-container `curl -v` output: it
+tries `127.0.0.1` first, gets refused, then falls back to `[::1]`
+(IPv6 loopback) and connects. That means the dev server is bound to
+loopback only — and to only *one* loopback address at that (commonly
+`::1`, e.g. when it's told to bind `localhost` and the runtime
+resolves that to IPv6 first).
+
+This isn't fixable from the `ruori` / Docker side. `docker run -p`
+forwards host traffic to the container's real network interface (the
+bridge network's `eth0`), never to the container's loopback — that's a
+Linux network-namespace boundary, not a Docker flag. A process bound
+to `127.0.0.1`/`::1` inside the container is reachable only from
+another process in that same namespace (i.e. another `docker exec`),
+never via the published port, no matter what `container-port` says.
+
+Fix it in the app, not the config: bind the dev server to `0.0.0.0`
+inside the container so it accepts connections on every interface,
+including the bridge one Docker's port-forwarding actually targets.
+For a Vite app this is `server.host: '0.0.0.0'` in `vite.config.ts`
+(or `--host 0.0.0.0` on the CLI); other dev servers (webpack-dev-server,
+Next.js, etc.) have an equivalent `--host`/`host` option. This is a
+generic "dev server defaults to localhost-only, which breaks the
+moment it's not the same machine/namespace as the client" issue, not
+specific to `ruori` — it just tends to surface here because container
+mode is often the first time a given dev server runs somewhere other
+than the developer's own host namespace.
+
 ## Directive comparison — don't mix these up
 
 | Directive | Direction | Timing | Ends up... |
