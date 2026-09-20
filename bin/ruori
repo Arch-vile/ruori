@@ -382,20 +382,34 @@ container_file_path() {
   printf '%s' "$result"
 }
 
-# One "<container-port>\t<name>" line per `container-port <port>[:<name>]`
-# directive, in config order (<name> empty when no ":<name>" was given).
+# One "<container-port>\t<name>\t<type>" line per `container-port
+# <port>[:<name>][:http]` directive, in config order (<name>/<type>
+# empty when not given). The optional trailing ":http" only splits off
+# the tail *after* the first colon, so a directive with no type suffix
+# parses exactly as it always has -- existing configs need no changes.
+# "http" is (for now) the only recognized <type>; it marks a port as an
+# HTTP server so browser_links_for can offer a clickable link for it,
+# as opposed to e.g. a database port that isn't browser-able.
 container_ports() {
-  local key value port name
+  local key value port rest name type
   while IFS=$'\t' read -r key value; do
     [ "$key" = "container-port" ] || continue
     [ -n "$value" ] || continue
     port="${value%%:*}"
     if [ "$value" = "$port" ]; then
       name=""
+      type=""
     else
-      name="${value#*:}"
+      rest="${value#*:}"
+      if [ "$rest" != "${rest%%:*}" ]; then
+        name="${rest%%:*}"
+        type="${rest#*:}"
+      else
+        name="$rest"
+        type=""
+      fi
     fi
-    printf '%s\t%s\n' "$port" "$name"
+    printf '%s\t%s\t%s\n' "$port" "$name" "$type"
   done < <(config_directives)
 }
 
@@ -610,6 +624,63 @@ container_ports_info_for() {
   fi
 }
 
+# Wraps $2 (display text, defaults to $1 itself) in an OSC 8 terminal
+# hyperlink pointing at url $1. Terminals that don't understand OSC 8
+# (fzf's preview pane included) just print the surrounding escape
+# bytes as inert filler around the still-readable text, so this is
+# safe to use unconditionally rather than needing a capability check.
+osc8_link() {
+  local url="$1" text="${2:-$1}"
+  printf '\033]8;;%s\033\\%s\033]8;;\033\\' "$url" "$text"
+}
+
+# One "<label>\thttp://localhost:<host-port>" line per host port
+# session $1 has allocated (see allocate_port_for/ports_cache_file)
+# whose `container-port` directive was marked ":http" (see
+# container_ports) -- i.e. only the ports actually worth offering a
+# browser link for, not every container-port (a database port, say,
+# isn't browser-able). Empty output if this repo has no ":http"-typed
+# ports, or this session hasn't allocated any yet (container never
+# started). label falls back to the container port itself when no
+# ":<name>" was given.
+browser_links_for() {
+  local session="$1" cache_file s cp hp
+  local -A http_label=()
+  local port name type
+  while IFS=$'\t' read -r port name type; do
+    [ "$type" = "http" ] || continue
+    http_label["$port"]="${name:-$port}"
+  done < <(container_ports)
+  [ "${#http_label[@]}" -gt 0 ] || return 0
+
+  cache_file="$(ports_cache_file)" || return 0
+  [ -f "$cache_file" ] || return 0
+  log_file_read "$cache_file"
+  while IFS=$'\t' read -r s cp hp; do
+    [ "$s" = "$session" ] || continue
+    [ -n "${http_label[$cp]:-}" ] || continue
+    printf '%s\thttp://localhost:%s\n' "${http_label[$cp]}" "$hp"
+  done <"$cache_file"
+}
+
+# browser_links_for's output flattened to one comma-joined
+# "<label>: <url>" line (or "-" if none), same convention as
+# container_ports_info_for -- for embedding as a single row field in
+# fzf_line_for, where the picker's own preview panes need one flat
+# string per field rather than browser_links_for's multi-line output.
+browser_links_summary_for() {
+  local session="$1" label url parts=()
+  while IFS=$'\t' read -r label url; do
+    parts+=("${label}: ${url}")
+  done < <(browser_links_for "$session")
+  if [ "${#parts[@]}" -eq 0 ]; then
+    echo "-"
+  else
+    local IFS=,
+    echo "${parts[*]}"
+  fi
+}
+
 # Always invokes `docker build`, letting Docker's own layer cache keep
 # repeat builds fast, rather than hand-rolling a staleness heuristic
 # that could miss a file the Dockerfile COPYs.
@@ -781,7 +852,7 @@ container_start_if_needed() {
 
   local -a port_flags=()
   local container_port port_name host_port env_name
-  while IFS=$'\t' read -r container_port port_name; do
+  while IFS=$'\t' read -r container_port port_name _; do
     [ -n "$container_port" ] || continue
     host_port="$(allocate_port_for "$name" "$container_port")"
     env_name="${port_name:-PORT_${container_port}}"
@@ -1357,13 +1428,14 @@ truncate_pad() {
 
 # One line per worktree: idx<TAB>current-marker<TAB>state-status<TAB>
 # claude-status<TAB>pr-status<TAB>usage-cost<TAB>branch<TAB>path<TAB>
-# session<TAB>raw-branch<TAB>image-info<TAB>ports-info. Only
-# marker/state/claude/pr/usage/branch are shown in the picker; the rest
-# are available to its preview window, and to the Enter action menu via
-# the selected row's own fields (see the manager loop below) regardless
-# of what --with-nth displays. Shared by `ruori list`, the interactive
-# picker, and the picker's own reload (so a session killed via the Enter
-# menu's "kill tmux"/"stop container" is reflected immediately).
+# session<TAB>raw-branch<TAB>image-info<TAB>ports-info<TAB>id-info<TAB>
+# browser-links-summary. Only marker/state/claude/pr/usage/branch are
+# shown in the picker; the rest are available to its preview window,
+# and to the Enter action menu via the selected row's own fields (see
+# the manager loop below) regardless of what --with-nth displays.
+# Shared by `ruori list`, the interactive picker, and the picker's own
+# reload (so a session killed via the Enter menu's "kill
+# tmux"/"stop container" is reflected immediately).
 #
 # The state column (and header, see fzf_header_line) doubles as tmux
 # activity in normal mode and container state in container mode — a
@@ -1372,7 +1444,7 @@ truncate_pad() {
 # two once containers are involved, and it's what the Enter menu's
 # "stop container" there actually changes.
 fzf_line_for() {
-  local i="$1" session active claude pr usage state image_info ports_info id_info
+  local i="$1" session active claude pr usage state image_info ports_info id_info url_info
   session="$(session_name_for "${branches[$i]}" "${paths[$i]}")"
   if tmux_has_session "$CONTAINER_MODE" "$session"; then
     active="active"
@@ -1388,13 +1460,15 @@ fzf_line_for() {
     image_info="$(container_image_info_for)"
     ports_info="$(container_ports_info_for "$session")"
     id_info="$(container_id_for "$session")"
+    url_info="$(browser_links_summary_for "$session")"
   else
     state="$active"
     image_info="-"
     ports_info="-"
     id_info="-"
+    url_info="-"
   fi
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$i" \
     "$(marker_for "${paths[$i]}")" \
     "$(truncate_pad "$state" "$TMUX_COL_WIDTH")" \
@@ -1402,7 +1476,7 @@ fzf_line_for() {
     "$(truncate_pad "$pr" "$PR_COL_WIDTH")" \
     "$(truncate_pad "$usage" "$USAGE_COL_WIDTH")" \
     "$(truncate_pad "${branches[$i]}" "$BRANCH_COL_WIDTH")" \
-    "${paths[$i]}" "$session" "${branches[$i]}" "$image_info" "$ports_info" "$id_info"
+    "${paths[$i]}" "$session" "${branches[$i]}" "$image_info" "$ports_info" "$id_info" "$url_info"
 }
 
 # The picker's own pinned column-header row (used with --header-lines=1),
@@ -1412,7 +1486,7 @@ fzf_line_for() {
 fzf_header_line() {
   local state_label="TMUX"
   [ "$CONTAINER_MODE" = "1" ] && state_label="DOCKER"
-  printf '\t%-*s\t%-*s\t%-*s\t%-*s\t%-*s\t%-*s\t\t\t\t\t\t\n' \
+  printf '\t%-*s\t%-*s\t%-*s\t%-*s\t%-*s\t%-*s\t\t\t\t\t\t\t\n' \
     "$MARKER_COL_WIDTH" "" \
     "$TMUX_COL_WIDTH" "$state_label" "$CLAUDE_COL_WIDTH" "CLAUDE" "$PR_COL_WIDTH" "PR" \
     "$USAGE_COL_WIDTH" "USAGE" "$BRANCH_COL_WIDTH" "BRANCH"
@@ -1692,7 +1766,14 @@ case "$cmd" in
     exit 0
     ;;
   ports)
-    printf "%-30s %-8s %-8s %-40s %s\n" "BRANCH" "CPORT" "HPORT" "SESSION" "PATH"
+    printf "%-30s %-8s %-8s %-40s %-50s %s\n" "BRANCH" "CPORT" "HPORT" "SESSION" "PATH" "URL"
+    # Only container-ports marked ":http" (see container_ports) get a
+    # URL here -- others (e.g. a database port) aren't browser-able.
+    declare -A ports_http_label=()
+    while IFS=$'\t' read -r cport_key cport_name cport_type; do
+      [ "$cport_type" = "http" ] || continue
+      ports_http_label["$cport_key"]=1
+    done < <(container_ports)
     ports_file="$(ports_cache_file 2>/dev/null || true)"
     if [ -n "$ports_file" ] && [ -f "$ports_file" ]; then
       log_file_read "$ports_file"
@@ -1701,7 +1782,9 @@ case "$cmd" in
         for i in "${!paths[@]}"; do
           session_name="$(session_name_for "${branches[$i]}" "${paths[$i]}")"
           if [ "$session_name" = "$row_session" ]; then
-            printf "%-30s %-8s %-8s %-40s %s\n" "${branches[$i]}" "$row_cport" "$row_hport" "$row_session" "${paths[$i]}"
+            row_url="-"
+            [ -n "${ports_http_label[$row_cport]:-}" ] && row_url="$(osc8_link "http://localhost:${row_hport}")"
+            printf "%-30s %-8s %-8s %-40s %-50s %s\n" "${branches[$i]}" "$row_cport" "$row_hport" "$row_session" "${paths[$i]}" "$row_url"
           fi
         done
       done <"$ports_file"
@@ -1906,6 +1989,9 @@ case "$cmd" in
       printf 'Cont.ID: %s\n' "$(container_id_for "$session_name")"
       printf 'Image:   %s\n' "$(container_image_info_for)"
       printf 'Ports:   %s\n' "$(container_ports_info_for "$session_name")"
+      while IFS=$'\t' read -r link_label link_url; do
+        printf 'URL:     %s: %s\n' "$link_label" "$(osc8_link "$link_url")"
+      done < <(browser_links_for "$session_name")
     fi
     exit 0
     ;;
@@ -2359,16 +2445,17 @@ fi
 
 # The preview panel's own field labels/order follow CONTAINER_MODE too:
 # container mode appends the short container id (field 13) to the Docker
-# state line, and adds the image (built or not) and allocated host ports
-# (see container_id_for/container_image_info_for/container_ports_info_for
-# and their fields 13/11/12 from fzf_line_for) below it, since those are
-# exactly what the Enter menu's "stop container"/switching there
-# actually change. No Session line:
+# state line, and adds the image (built or not), allocated host ports,
+# and any ":http"-typed ports' clickable URLs (see
+# container_id_for/container_image_info_for/container_ports_info_for/
+# browser_links_summary_for and their fields 13/11/12/14 from
+# fzf_line_for) below it, since those are exactly what the Enter menu's
+# "stop container"/switching there actually change. No Session line:
 # the container name doesn't add anything the id and branch don't already
 # say.
 if [ "$CONTAINER_MODE" = "1" ]; then
-  fzf_preview_cmd='printf "Branch:  %s\nDocker:  %s (container %s)\nImage:   %s\nPorts:   %s\nCLAUDE:  %s\nPR:      %s\nUSAGE:   %s\nPath:    %s\n" {10} {3} {13} {11} {12} {4} {5} {6} {8}'
-  fzf_preview_lines=9
+  fzf_preview_cmd='printf "Branch:  %s\nDocker:  %s (container %s)\nImage:   %s\nPorts:   %s\nURL:     %s\nCLAUDE:  %s\nPR:      %s\nUSAGE:   %s\nPath:    %s\n" {10} {3} {13} {11} {12} {14} {4} {5} {6} {8}'
+  fzf_preview_lines=10
 else
   fzf_preview_cmd='printf "Branch:  %s\nTMUX:    %s\nCLAUDE:  %s\nPR:      %s\nUSAGE:   %s\nPath:    %s\nSession: %s\n" {10} {3} {4} {5} {6} {8} {9}'
   fzf_preview_lines=8
@@ -2444,16 +2531,27 @@ while true; do
   # this script's own variables otherwise; unset right after so it
   # doesn't linger for anything spawned later.
   if [ "$CONTAINER_MODE" = "1" ]; then
-    export RUORI_MENU_PREVIEW="$(printf '%s' "$selection" | awk -F'\t' '{printf "Branch:  %s\nDocker:  %s (container %s)\nImage:   %s\nPorts:   %s\nCLAUDE:  %s\nPR:      %s\nUSAGE:   %s\nPath:    %s\n", $10, $3, $13, $11, $12, $4, $5, $6, $8}')"
+    export RUORI_MENU_PREVIEW="$(printf '%s' "$selection" | awk -F'\t' '{printf "Branch:  %s\nDocker:  %s (container %s)\nImage:   %s\nPorts:   %s\nURL:     %s\nCLAUDE:  %s\nPR:      %s\nUSAGE:   %s\nPath:    %s\n", $10, $3, $13, $11, $12, $14, $4, $5, $6, $8}')"
   else
     export RUORI_MENU_PREVIEW="$(printf '%s' "$selection" | awk -F'\t' '{printf "Branch:  %s\nTMUX:    %s\nCLAUDE:  %s\nPR:      %s\nUSAGE:   %s\nPath:    %s\nSession: %s\n", $10, $3, $4, $5, $6, $8, $9}')"
   fi
+
+  # "open in browser" only shows up when there's actually a
+  # ":http"-typed container-port allocated for this session (see
+  # browser_links_for) -- no point offering it for host mode, a repo
+  # with no ":http" ports, or a worktree whose container has never
+  # started (nothing allocated yet).
+  menu_items=("switch to" "delete worktree")
+  if [ "$CONTAINER_MODE" = "1" ] && [ -n "$(browser_links_for "$session_name")" ]; then
+    menu_items+=("open in browser")
+  fi
+  menu_items+=("$ctrl_x_label" "back")
 
   # `|| true`: fzf exits non-zero on Esc/Ctrl-C, which under this
   # script's `set -e` would otherwise kill the whole manager loop right
   # here instead of just falling through to the no-op case below and
   # looping back to the worktree picker.
-  menu_choice="$(printf '%s\n' "switch to" "delete worktree" "$ctrl_x_label" "back" \
+  menu_choice="$(printf '%s\n' "${menu_items[@]}" \
     | fzf --prompt="action > " --header="${selected_branch} · esc: back to worktree list" --layout=reverse \
       --preview 'printf "%s" "$RUORI_MENU_PREVIEW"' \
       --preview-window="bottom:${fzf_preview_lines}:wrap")" || true
@@ -2465,6 +2563,12 @@ while true; do
       ;;
     "delete worktree")
       delete_worktree "$selected_path" "$selected_branch" "$session_name"
+      ;;
+    "open in browser")
+      while IFS=$'\t' read -r link_label link_url; do
+        printf '%s: %s\n' "$link_label" "$(osc8_link "$link_url")"
+      done < <(browser_links_for "$session_name")
+      read -r -p "Press Enter to continue..." _ || true
       ;;
     "kill tmux"|"stop container")
       if [ "$CONTAINER_MODE" = "1" ]; then

@@ -127,10 +127,15 @@ Five directives go in the same `.ruori.conf` from step 2:
   you're setting `ruori` up on via this guide, always write it.
 - **`container-file <path>`** — Dockerfile path relative to the main
   worktree root. Defaults to `.devcontainer/Dockerfile` if omitted.
-- **`container-port <port>[:<NAME>]`** — repeatable, one per port the
-  app exposes. `ruori` allocates a free host port for each and injects it
-  into the container's environment as `<NAME>` (or `PORT_<port>` if
-  `:<NAME>` is omitted).
+- **`container-port <port>[:<NAME>][:http]`** — repeatable, one per
+  port the app exposes. `ruori` allocates a free host port for each and
+  injects it into the container's environment as `<NAME>` (or
+  `PORT_<port>` if `:<NAME>` is omitted). Add a trailing `:http` (e.g.
+  `container-port 3000::http`) for any port that's an HTTP server the
+  user would open in a browser — `ruori` then offers a clickable
+  `http://localhost:<host-port>` link for it (Enter action menu, `ruori
+  ports`). Skip `:http` for a port that isn't browser-able (a database,
+  say).
 - **`container-copy <host-path>[:<container-path>]`** — repeatable.
   Copies a host file into the container's own filesystem once, at
   creation time only (a private, writable copy — not a live link back

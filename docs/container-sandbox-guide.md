@@ -61,13 +61,20 @@ with none of these behaves exactly as it does today.
 - **`container-file <path>`** — path to the Dockerfile, relative to the
   main worktree root. Defaults to `.devcontainer/Dockerfile` if
   omitted.
-- **`container-port <port>[:<NAME>]`** — repeatable, one per port the
-  app exposes (e.g. a frontend and a backend). `ruori` allocates a free
-  host port for each, publishes it (`-p 127.0.0.1:<host>:<container>`),
-  and injects it into the container's environment as `<NAME>=<host
-  port>`. If you omit `:<NAME>`, the env var defaults to
-  `PORT_<container-port>` (e.g. `container-port 3000` sets
-  `PORT_3000`).
+- **`container-port <port>[:<NAME>][:http]`** — repeatable, one per
+  port the app exposes (e.g. a frontend and a backend). `ruori`
+  allocates a free host port for each, publishes it (`-p
+  127.0.0.1:<host>:<container>`), and injects it into the container's
+  environment as `<NAME>=<host port>`. If you omit `:<NAME>`, the env
+  var defaults to `PORT_<container-port>` (e.g. `container-port 3000`
+  sets `PORT_3000`). Add a trailing `:http` to mark the port as an HTTP
+  server — e.g. `container-port 3000:FRONTEND_PORT:http`, or
+  `container-port 3000::http` to keep the default env var name — and
+  `ruori` offers a clickable `http://localhost:<host-port>` link for it
+  in the Enter action menu's "open in browser" item and in `ruori
+  ports`'s `URL` column. Ports without `:http` (a database, say) never
+  get a link. `:http` only marks a port as browser-able; it doesn't
+  change the `-p`/env-var behavior above.
 - **`container-copy <host-path>[:<container-path>]`** — repeatable.
   Copies `<host-path>` into the container's own filesystem, once, the
   moment the container is first created — never re-copied afterward,
@@ -474,7 +481,7 @@ existing `DATABASE_URL`/`REDIS_HOST` values pointing at `localhost` (or
 ```
 container on
 container-file .devcontainer/Dockerfile
-container-port 3000:FRONTEND_PORT
+container-port 3000:FRONTEND_PORT:http
 container-port 8000:BACKEND_PORT
 container-copy ~/.claude/.credentials.json:/root/.claude/.credentials.json
 ```
@@ -514,7 +521,9 @@ With this config, `ruori` will:
    attach`.
 
 Run `ruori ports` any time to see each worktree's live host-port
-mappings.
+mappings — the `:http`-typed `FRONTEND_PORT` above gets a clickable
+`URL` column entry there and an "open in browser" item in the Enter
+action menu; `BACKEND_PORT` doesn't, since it has no `:http`.
 
 ## Verifying it works
 

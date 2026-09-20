@@ -79,12 +79,19 @@ Keybindings:
   status, PR, usage, path, session) shown in a preview pane underneath
   it, same as the picker's own preview. Items: **switch to** (first, so
   it stays the fast path — see above), **delete worktree** (see
-  "Deleting a worktree" below), **kill tmux**/**stop container** (kills
-  the tmux session, or in container mode stops the container outright;
-  the `TMUX`/Docker state updates on the next picker reload, and
-  switching to that row afterwards starts a fresh session for it), and
-  **back**. Esc/Ctrl-C on the menu does the same as picking "back" —
-  both return to the worktree picker rather than exiting `ruori`.
+  "Deleting a worktree" below), **open in browser** (container mode
+  only, and only when this worktree has at least one `:http`-typed
+  `container-port` allocated — see the `container-port` directive in
+  [container-sandbox-guide.md](container-sandbox-guide.md); prints a
+  clickable `http://localhost:<host-port>` link per such port rather
+  than launching a browser itself, and waits for Enter before
+  returning to the picker so the link doesn't scroll away unread),
+  **kill tmux**/**stop container** (kills the tmux session, or in
+  container mode stops the container outright; the `TMUX`/Docker state
+  updates on the next picker reload, and switching to that row
+  afterwards starts a fresh session for it), and **back**. Esc/Ctrl-C
+  on the menu does the same as picking "back" — both return to the
+  worktree picker rather than exiting `ruori`.
 - **Ctrl-N** — create a new worktree (prompts for a branch name, creates
   it, reloads the list) without activating it — see "Creating a
   worktree" below for why it stops there
@@ -148,12 +155,17 @@ on the highlighted row in the picker.
 
 Everything `ruori` knows about one worktree: branch, current?, path,
 session name, active tmux?, `CLAUDE` status, `PR`, usage cost, and (in
-container mode) Docker state/container id/image/ports.
+container mode) Docker state/container id/image/ports. One `URL:` line
+per `:http`-typed `container-port` with a host port allocated, each a
+clickable `http://localhost:<host-port>` link — omitted entirely if
+there are none.
 
 ## `ruori ports`
 
-Dashboard of container-mode host-port allocations. See the
-[container sandbox guide](container-sandbox-guide.md).
+Dashboard of container-mode host-port allocations. The `URL` column is
+a clickable `http://localhost:<host-port>` link for ports whose
+`container-port` directive is marked `:http`, and `-` for the rest.
+See the [container sandbox guide](container-sandbox-guide.md).
 
 ## `ruori resources [branch-or-session]`
 
