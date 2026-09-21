@@ -103,6 +103,9 @@ for the full container-mode walkthrough.
   [docs/config-file.md](docs/config-file.md)
 - **Troubleshooting** — mainly leftover iTerm2 windows:
   [docs/troubleshooting.md](docs/troubleshooting.md)
+- **Gimmicks** — every non-obvious problem `ruori` has had to work
+  around, what was rejected, and why the code is the way it is:
+  [docs/gimmicks.md](docs/gimmicks.md)
 - **Setting up a new repo** — the full walkthrough `ruori init` (above)
   points your agent at:
   [docs/new-repo-setup-guide.md](docs/new-repo-setup-guide.md)

@@ -169,3 +169,19 @@ resource), update the `resources)` case branch in `bin/ruori` and the
 "`ruori resources`" section of `docs/commands.md` in the same change,
 so this listing never drifts out of sync with what the script
 actually does.
+
+## Keeping `docs/gimmicks.md` current
+
+`docs/gimmicks.md` is the record of every non-obvious problem `ruori`
+has had to work around — the surprising fact, what was rejected, and
+the decision the code now embodies. It exists so that rationale
+survives the people and sessions that discovered it. Before changing
+behavior in an area it covers, read its entries for that area; a
+"cleanup" that removes a `|| true`, a `*_prime` call, or a
+`LC_NUMERIC=C` is usually undoing one of them. Whenever a change works
+around something a future reader wouldn't guess from the code or the
+tool's documentation (a platform quirk, a tool behaving contrary to
+its docs, an approach that was tried and reverted), add an entry in
+the same change, in the same shape: fact, rejected alternatives if
+any, decision, and the function/doc-section it lives in — never a
+line number.
