@@ -147,23 +147,21 @@ Six directives go in the same `.ruori.conf` from step 2:
   `socat` relay there to `host.docker.internal:<port>` on the host —
   see the next bullet for when this applies. Requires `socat` in the
   Dockerfile.
-- **`container-volume <relative-path-or-pattern>`** — repeatable. Gives
-  a subpath of the worktree its own Docker volume inside the container
-  instead of sharing the host's directory. The worktree is a live bind
-  mount and the container is Linux while the host is macOS, so
-  anything the toolchain *generates per platform* must not be shared:
-  native binaries in `node_modules`, compiled build output, a
-  `.pnpm-store`, a Rust `target/`, a Python venv. Add one line per such
-  directory. A pattern's directory part is matched against git-tracked
-  directories and its last segment appended literally, so
-  `container-volume apps/*/node_modules` covers every workspace
-  package, including ones added later. Rule of thumb: read the repo's
-  `.gitignore` and workspace layout (`pnpm-workspace.yaml`, `package.json`
-  `workspaces`, etc.), and shadow every generated directory you find,
-  using a pattern for anything that repeats per package. The user runs
-  their own native install on the host once per worktree for editor
-  support; see "Host-side tooling and generated directories" in the
-  container sandbox guide.
+- **`container-volume <relative-path>`** — repeatable. Gives a subpath
+  of the worktree its own Docker volume inside the container instead
+  of sharing the host's directory. The worktree is a live bind mount
+  and the container is Linux while the host is macOS, so anything the
+  toolchain *generates per platform* must not be shared: native
+  binaries in `node_modules`, compiled build output, a `.pnpm-store`, a
+  Rust `target/`, a Python venv. Add one exact line per such directory
+  — no globs. Read the repo's `.gitignore` and workspace layout
+  (`pnpm-workspace.yaml`, `package.json` `workspaces`, etc.) and list
+  every generated directory you find, including each workspace
+  package's own `node_modules` (`apps/api/node_modules`,
+  `apps/web/node_modules`, ...). The user runs their own native install
+  on the host once per worktree for editor support; see "Host-side
+  tooling and generated directories" in the container sandbox guide,
+  which has a Node.js monorepo recipe.
 
 Ask the user what you need to draft (or verify an existing) Dockerfile
 — this part genuinely needs their input, unlike whether to do container

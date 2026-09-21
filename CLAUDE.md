@@ -74,11 +74,11 @@ change:
    for the motivating use case. The worktree is one live bind mount;
    `container-volume` carves per-platform generated directories
    (`node_modules`, build output) out of it into container-only Docker
-   volumes. Its patterns resolve against git-tracked directories
-   (`container_volume_relpaths`), never the filesystem, so they work on
-   a fresh worktree; since Docker can't change an existing container's
-   mounts, `warn_container_volume_drift` tells the user when a `ruori
-   rebuild` is needed. See that guide's "Host-side tooling and generated
+   volumes, one exact path per line — deliberately no globs (see
+   `docs/gimmicks.md`). Since Docker can't change an existing
+   container's mounts, `warn_container_volume_drift` tells the user
+   when a `ruori rebuild` is needed. See
+   `docs/container-sandbox-guide.md`'s "Host-side tooling and generated
    directories" for the model.
 5. **Port allocation** (`allocate_port_for`/`ports_cache_file`) — a
    separate mechanism from env-file copying: ports are injected as

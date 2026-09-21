@@ -509,16 +509,14 @@ container_host_ports() {
   done < <(config_directives)
 }
 
-# One "<relative-path-or-pattern>" line per `container-volume <value>`
-# directive, in config order, unexpanded. <value> (relative to the
-# worktree root) names a subpath that gets its own Docker-managed volume
-# instead of living on the bind-mounted worktree — see
-# container_volume_relpaths for how a pattern expands into concrete
-# subpaths, container_volume_name_for for the volume names, and the
-# extra `docker run -v` flags container_start_if_needed feeds from them.
-# Opt-in, repo-specific: this directive carries no assumption about what
-# the path is for (a repo's own node_modules being the motivating case is
-# incidental, not something this accessor or its callers know about).
+# One "<relative-path>" line per `container-volume <relative-path>`
+# directive, in config order. <relative-path> (relative to the worktree
+# root) gets its own Docker-managed volume instead of living on the
+# bind-mounted worktree — see container_volume_name_for and the extra
+# `docker run -v` flag it feeds in container_start_if_needed. Opt-in,
+# repo-specific: this directive carries no assumption about what the
+# path is for (a repo's own node_modules being the motivating case is
+# incidental, not something this accessor or its caller know about).
 container_native_volumes() {
   local key value
   while IFS=$'\t' read -r key value; do
@@ -526,101 +524,6 @@ container_native_volumes() {
     [ -n "$value" ] || continue
     printf '%s\n' "$value"
   done < <(config_directives)
-}
-
-# Turns a shell-style glob (as documented for `copy`: `*`, `?`, `[...]`,
-# and `**` across directories) into a bash [[ == ]] pattern (extglob
-# on) where `*` and `?` stop at `/` and only `**` crosses it. A `**`
-# path segment matches zero or more directories, so `apps/**` covers
-# `apps` itself as well as `apps/x/y`. Placeholders keep each rewrite
-# from being re-expanded by a later one.
-glob_to_bash_pattern() {
-  local p="$1"
-  p="${p//\/\*\*\//$'\x02'}"
-  case "$p" in '**/'*) p=$'\x03'"${p#\*\*/}" ;; esac
-  case "$p" in *'/**') p="${p%/\*\*}"$'\x04' ;; esac
-  p="${p//\*\*/$'\x01'}"
-  p="${p//\*/*([!\/])}"
-  p="${p//\?/[!\/]}"
-  p="${p//$'\x01'/*}"
-  p="${p//$'\x02'/@(/|/*/)}"
-  p="${p//$'\x03'/@(|*/)}"
-  p="${p//$'\x04'/@(|/*)}"
-  printf '%s' "$p"
-}
-
-# Resolves every `container-volume` value to the concrete subpaths of
-# worktree $1 that get a volume, one per line, deduplicated. A value with
-# no glob character passes through untouched (no existence check — Docker
-# creates the mountpoint, which is what lets a fresh worktree get its
-# node_modules volume before anything has ever been installed there).
-#
-# A pattern is split at its last `/` into <dir-pattern>/<leaf>. Only the
-# dir part is matched, against the worktree's *git-tracked* directories
-# (plus "" for zero depth), and <leaf> is then appended literally to
-# each match, again with no existence check. That asymmetry is the whole
-# point: the directories a pattern like `apps/*/node_modules` selects
-# among are committed source, so they exist in every worktree, while the
-# `node_modules` under each is exactly the thing that doesn't exist yet
-# at container-creation time. Matching against `git ls-tree` rather than
-# the filesystem also means no crawl through an existing node_modules
-# and no dependence on what a previous host-side install left behind.
-container_volume_relpaths() {
-  local path="$1" value dir_pat leaf pat d
-  local -a tracked_dirs=()
-  local tracked_loaded=0
-  # glob_to_bash_pattern emits @(...) alternations; save/restore like
-  # sync_env_files does for globstar.
-  local had_extglob=1
-  shopt -q extglob || had_extglob=0
-  shopt -s extglob
-  while IFS= read -r value; do
-    [ -n "$value" ] || continue
-    case "$value" in
-      *[*?[]*) ;;
-      *) printf '%s\n' "$value"; continue ;;
-    esac
-    if [ "$value" = "${value%/*}" ]; then
-      dir_pat=""
-      leaf="$value"
-    else
-      dir_pat="${value%/*}"
-      leaf="${value##*/}"
-    fi
-    if [ "$tracked_loaded" = "0" ]; then
-      tracked_loaded=1
-      tracked_dirs=("")
-      while IFS= read -r d; do
-        [ -n "$d" ] && tracked_dirs+=("$d")
-      done < <(git -C "$path" ls-tree -r -d --name-only HEAD 2>/dev/null)
-    fi
-    if [ -z "$dir_pat" ]; then
-      # Glob in the leaf itself (e.g. `*.cache`): match it against
-      # top-level tracked directories only, then use each match as-is.
-      pat="$(glob_to_bash_pattern "$leaf")"
-      for d in "${tracked_dirs[@]}"; do
-        [ -n "$d" ] || continue
-        # shellcheck disable=SC2053
-        [[ "$d" == $pat ]] && printf '%s\n' "$d"
-      done
-      continue
-    fi
-    pat="$(glob_to_bash_pattern "$dir_pat")"
-    for d in "${tracked_dirs[@]}"; do
-      # The zero-depth "" entry is only a candidate for `**` (zero or
-      # more directories); a plain `*` must consume a real path segment.
-      [ -z "$d" ] && [ "$dir_pat" = "${dir_pat//\*\*/}" ] && continue
-      # shellcheck disable=SC2053
-      if [[ "$d" == $pat ]]; then
-        if [ -n "$d" ]; then
-          printf '%s/%s\n' "$d" "$leaf"
-        else
-          printf '%s\n' "$leaf"
-        fi
-      fi
-    done
-  done < <(container_native_volumes) | awk '!seen[$0]++'
-  [ "$had_extglob" = "1" ] || shopt -u extglob
 }
 
 # Deterministic per-(worktree, subpath) Docker volume name for a
@@ -635,16 +538,15 @@ container_volume_name_for() {
   printf '%s__vol-%s' "$session" "$(sanitize "$relpath")"
 }
 
-# Warns when the subpaths the `container-volume` directives resolve to
-# today differ from the volumes container $1 was actually created with.
-# Docker can't add or drop a mount on an existing container, so a
-# pattern that newly matches a just-committed package directory (or a
-# directive edited by hand) only takes effect on `ruori rebuild`; this
-# is what tells you that's pending. One `docker inspect` per
-# activation, not per picker draw.
+# Warns when the `container-volume` directives in .ruori.conf differ
+# from the volumes container $1 was actually created with. Docker can't
+# add or drop a mount on an existing container, so a directive added
+# or removed since (e.g. a new workspace package's node_modules) only
+# takes effect on `ruori rebuild`; this is what tells you that's
+# pending. One `docker inspect` per activation, not per picker draw.
 warn_container_volume_drift() {
   local name="$1" path="$2" branch="$3" want have missing extra
-  want="$(container_volume_relpaths "$path" | sort)"
+  want="$(container_native_volumes | sort -u)"
   have="$(docker inspect -f '{{range .Mounts}}{{if eq .Type "volume"}}{{.Destination}}{{"\n"}}{{end}}{{end}}' "$name" 2>/dev/null \
     | sed -n "s|^${path}/||p" | sort)"
   [ "$want" = "$have" ] && return 0
@@ -1084,21 +986,19 @@ container_start_if_needed() {
     port_flags+=(-p "127.0.0.1:${host_port}:${container_port}" -e "${env_name}=${host_port}")
   done < <(container_ports)
 
-  # One -v flag per subpath a `container-volume` directive resolves to
-  # (see container_volume_relpaths -- a pattern can yield several),
-  # shadowing that subpath of the worktree bind mount below with a
-  # Docker-managed volume on the container's own native storage --
-  # Docker layers a more-specific mount over a broader one regardless
-  # of flag order, so this works whether it's listed before or after
-  # "-v $path:$path". See container_volume_name_for for the naming
-  # scheme.
+  # One -v flag per `container-volume` directive, shadowing that
+  # subpath of the worktree bind mount below with a Docker-managed
+  # volume on the container's own native storage -- Docker layers a
+  # more-specific mount over a broader one regardless of flag order, so
+  # this works whether it's listed before or after "-v $path:$path".
+  # See container_volume_name_for for the naming scheme.
   local -a native_volume_flags=()
   local relpath volname
   while IFS= read -r relpath; do
     [ -n "$relpath" ] || continue
     volname="$(container_volume_name_for "$name" "$relpath")"
     native_volume_flags+=(-v "$volname:$path/$relpath")
-  done < <(container_volume_relpaths "$path")
+  done < <(container_native_volumes)
 
   # RUORI_SHARED_DIR tells the image's own entrypoint/Dockerfile where
   # this repo's shared, writable, cross-worktree storage lives inside
@@ -2175,7 +2075,7 @@ case "$cmd" in
       if [ -n "$native_volumes" ]; then
         while IFS= read -r native_volume; do
           [ -n "$native_volume" ] || continue
-          resources_entry "$native_volume" "Not a file -- a Docker-managed volume (not the worktree's own filesystem) shadowing one subpath of this worktree inside the container, per a 'container-volume' directive in $CONFIG_FILENAME (one volume per subpath a directive resolves to -- a pattern like apps/*/node_modules yields several; see docs/container-sandbox-guide.md). Created the first time this worktree's container starts, or on 'ruori rebuild' for a subpath a pattern newly matches; only actually removed by 'ruori rm', same as the container itself -- queried here by name, not by re-reading the current directive, so it's still listed even if that directive has since been edited or removed."
+          resources_entry "$native_volume" "Not a file -- a Docker-managed volume (not the worktree's own filesystem) shadowing one subpath of this worktree inside the container, per a 'container-volume' directive in $CONFIG_FILENAME (see docs/container-sandbox-guide.md). Created the first time this worktree's container starts, or on 'ruori rebuild' for a directive added since; only actually removed by 'ruori rm', same as the container itself -- queried here by name, not by re-reading the current directive, so it's still listed even if that directive has since been edited or removed."
         done <<<"$native_volumes"
       fi
       if [ -n "$(container_host_ports)" ]; then

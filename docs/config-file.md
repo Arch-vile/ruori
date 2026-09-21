@@ -61,19 +61,16 @@ Six more directives opt a repo into **container mode**: `container`,
 and a worked example — a repo with none of them behaves exactly as
 described above.
 
-Of those, `container-volume` also takes the same wildcard syntax as
-`copy`, but with one deliberate difference: the *directory* part of the
-pattern is matched against the repo's git-tracked directories, and the
-last path segment is appended literally without needing to exist. That
-way `container-volume apps/*/node_modules` names every workspace
-package's `node_modules` even though none of them exist yet in a fresh
-worktree:
+Note that `copy` is the only directive that takes a glob; the rest,
+`container-volume` included, take exact values — a directory the
+container gets its own storage for should be readable straight off the
+config file, one line each:
 
 ```
 # .ruori.conf — per-platform generated directories, container-only
 container-volume node_modules
-container-volume apps/*/node_modules
-container-volume packages/*/dist
+container-volume apps/api/node_modules
+container-volume apps/web/node_modules
 ```
 
 The easiest way to get all of this (config file *and* Dockerfile *and*
