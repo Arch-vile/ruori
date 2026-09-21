@@ -61,6 +61,18 @@ Six more directives opt a repo into **container mode**: `container`,
 and a worked example — a repo with none of them behaves exactly as
 described above.
 
+Note that `copy` is the only directive that takes a glob; the rest,
+`container-volume` included, take exact values — a directory the
+container gets its own storage for should be readable straight off the
+config file, one line each:
+
+```
+# .ruori.conf — per-platform generated directories, container-only
+container-volume node_modules
+container-volume apps/api/node_modules
+container-volume apps/web/node_modules
+```
+
 The easiest way to get all of this (config file *and* Dockerfile *and*
 the Claude Code status hook baked into it) written for a repo in one
 shot is `ruori init` — see the

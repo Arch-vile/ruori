@@ -538,6 +538,23 @@ container_volume_name_for() {
   printf '%s__vol-%s' "$session" "$(sanitize "$relpath")"
 }
 
+# Warns when the `container-volume` directives in .ruori.conf differ
+# from the volumes container $1 was actually created with. Docker can't
+# add or drop a mount on an existing container, so a directive added
+# or removed since (e.g. a new workspace package's node_modules) only
+# takes effect on `ruori rebuild`; this is what tells you that's
+# pending. One `docker inspect` per activation, not per picker draw.
+warn_container_volume_drift() {
+  local name="$1" path="$2" branch="$3" want have missing extra
+  want="$(container_native_volumes | sort -u)"
+  have="$(docker inspect -f '{{range .Mounts}}{{if eq .Type "volume"}}{{.Destination}}{{"\n"}}{{end}}{{end}}' "$name" 2>/dev/null \
+    | sed -n "s|^${path}/||p" | sort)"
+  [ "$want" = "$have" ] && return 0
+  missing="$(comm -23 <(printf '%s\n' "$want") <(printf '%s\n' "$have") | sed '/^$/d; s/^/+/' | paste -sd' ' -)"
+  extra="$(comm -13 <(printf '%s\n' "$want") <(printf '%s\n' "$have") | sed '/^$/d; s/^/-/' | paste -sd' ' -)"
+  echo "ruori: container-volume targets changed (${missing}${missing:+ }${extra}); run 'ruori rebuild ${branch}' to apply" >&2
+}
+
 # Copy any files matching the configured patterns (see copy_patterns/
 # CONFIG_FILENAME above) from the main worktree into the target worktree,
 # skipping ones that already exist there (never overwrites — e.g. a
@@ -2058,7 +2075,7 @@ case "$cmd" in
       if [ -n "$native_volumes" ]; then
         while IFS= read -r native_volume; do
           [ -n "$native_volume" ] || continue
-          resources_entry "$native_volume" "Not a file -- a Docker-managed volume (not the worktree's own filesystem) shadowing one subpath of this worktree inside the container, per a 'container-volume' directive in $CONFIG_FILENAME (see docs/container-sandbox-guide.md). Created the first time this worktree's container starts; only actually removed by 'ruori rm', same as the container itself -- queried here by name, not by re-reading the current directive, so it's still listed even if that directive has since been edited or removed."
+          resources_entry "$native_volume" "Not a file -- a Docker-managed volume (not the worktree's own filesystem) shadowing one subpath of this worktree inside the container, per a 'container-volume' directive in $CONFIG_FILENAME (see docs/container-sandbox-guide.md). Created the first time this worktree's container starts, or on 'ruori rebuild' for a directive added since; only actually removed by 'ruori rm', same as the container itself -- queried here by name, not by re-reading the current directive, so it's still listed even if that directive has since been edited or removed."
         done <<<"$native_volumes"
       fi
       if [ -n "$(container_host_ports)" ]; then
@@ -2576,6 +2593,7 @@ activate_worktree() {
 
   if [ "$CONTAINER_MODE" = "1" ]; then
     container_start_if_needed "$session_name" "$target_path"
+    warn_container_volume_drift "$session_name" "$target_path" "$target_branch"
     if docker exec "$session_name" tmux has-session -t "$session_name" 2>/dev/null; then
       echo "ruori: resuming existing session for ${target_branch}"
     else

@@ -27,13 +27,11 @@ it into a container** — one container per worktree. Specifically:
   anything. Only what you explicitly list via `container-copy` (below)
   ever crosses into the container, and even that is a one-time,
   disconnected copy, not a live link. The one opt-in exception is
-  `container-volume` (below): a subpath you name gets its own
+  `container-volume` (below): each subpath you name gets its own
   Docker-managed volume, living on the container's native storage
-  instead of the bind-mounted worktree — some tools' native binaries
-  (observed with a self-relaunching Go/Rust binary shipped as an npm
-  optional dependency) don't reliably survive being executed straight
-  off Docker Desktop's virtiofs bind mount, and this is the escape
-  hatch for that.
+  instead of the bind-mounted worktree. See "Host-side tooling and
+  generated directories" below for why you want that for anything a
+  toolchain generates per platform.
 - **`ruori` never decides what runs inside the container's tmux session.**
   It only creates a *bare* tmux session and attaches iTerm2 to it —
   no command is ever injected. Whatever starts (an agent, a plain
@@ -97,19 +95,32 @@ with none of these behaves exactly as it does today.
   forwarders included), never persisted to a file.
 - **`container-volume <relative-path>`** — repeatable, one per subpath
   (relative to the worktree root) that should live on the container's
-  own native Docker storage instead of the bind-mounted worktree — a
-  common case is `node_modules` in a Node.js repo, but the directive
-  itself doesn't know or care what the path is for. `ruori` adds an
-  extra `-v <volume>:<worktree-path>/<relative-path>` to the container's
+  own native Docker storage instead of the bind-mounted worktree — the
+  common case is whatever your toolchain generates per platform
+  (`node_modules`, build output, caches — see "Host-side tooling and
+  generated directories" below), but the directive itself doesn't know
+  or care what the path is for. `ruori` adds an extra
+  `-v <volume>:<worktree-path>/<relative-path>` to the container's
   `docker run`, shadowing just that subpath; everything else in the
   worktree stays live-shared with the host exactly as without this
-  directive. The volume is created empty the first time the container
-  starts — run whatever populates that path (`pnpm install`, etc.)
-  *inside* the container afterward, same as you would without this
-  directive, since nothing is copied in from the host side. Only
-  actually removed by `ruori rm`, same as the container itself; `docker
-  start`/`docker stop` leaves it untouched. See "Directive comparison"
-  below for how this differs from `container-copy`.
+  directive. The path is taken as-is and needn't exist yet — Docker
+  creates the mountpoint, which is what lets a fresh worktree get its
+  `node_modules` volume before anything has been installed there. The
+  volume is created empty the first time the container starts — run
+  whatever populates that path (`pnpm install`, etc.) *inside* the
+  container afterward, same as you would without this directive, since
+  nothing is copied in from the host side. Only actually removed by
+  `ruori rm`, same as the container itself; `docker start`/`docker
+  stop` leaves it untouched. See "Directive comparison" below for how
+  this differs from `container-copy`.
+
+  Docker can't add or remove a mount on an existing container, so a
+  `container-volume` line added or removed later only takes effect on
+  the next container creation. `ruori` checks on every switch and
+  prints `container-volume targets changed (+…); run 'ruori rebuild
+  <branch>' to apply` when that's pending — see `docs/commands.md`.
+  Existing volumes keep their data across a rebuild; only the new
+  subpaths start empty.
 
 There is **no directive that launches an agent** — see "what container
 mode does and doesn't sandbox" above for why.
@@ -169,6 +180,73 @@ publish images built from these containers.
 forwarded SSH inside the container, that needs a live bind-mount of
 `$SSH_AUTH_SOCK` (so key material never leaves the host), which doesn't
 fit the copy-in model above — it isn't set up by `ruori` today.
+
+## Host-side tooling and generated directories
+
+The container is Linux; your host is macOS. Anything a toolchain
+*generates* for the platform it runs on — native addons and
+platform-specific binaries in `node_modules`, compiled build output,
+`.pnpm-store`, a Rust `target/`, a Python venv — is only valid on the
+side that produced it. Because the worktree is one live bind mount,
+without further configuration those artifacts land in a directory both
+sides see: an install run inside the container leaves Linux binaries
+where the host's editor tooling then tries to load them (or an install
+run on the host leaves macOS ones for the container). There's no way
+to make one copy work for both, so the model is:
+
+- **Source files**: one shared copy via the bind mount. Zero lag, no
+  sync, no way for the two sides to diverge — and `git` sees the same
+  working tree from either side, so commits from the container and
+  from the host are interchangeable.
+- **Generated directories**: container-only, one Docker volume each,
+  declared with `container-volume`. Inside the container the path is
+  the volume; on the host the same path is just an ordinary (usually
+  empty) directory that the container never touches.
+- **Host-side tooling** that needs those dependencies — an editor's
+  language server, a host-side test runner — gets them from its own
+  native install, run once per worktree on the host (`pnpm install` in
+  the worktree directory, outside any `ruori` session). The container
+  neither sees nor is affected by it.
+
+The rule of thumb when writing `.ruori.conf`: shadow every directory
+the toolchain generates per platform, one explicit `container-volume`
+line each. This is a one-time setup step per repo, and adding a
+directory later (a new workspace package, say) is one more line plus
+`ruori rebuild <branch>` — `ruori` reminds you on the next switch.
+`container-volume` deliberately takes exact paths, not patterns: the
+set of directories you're shadowing should be something you can read
+off the config file, not something resolved behind your back.
+
+### Recipe: a Node.js monorepo
+
+For a workspace layout (pnpm/npm/yarn workspaces, Turborepo), list the
+root and each package's generated directories:
+
+```
+container-volume node_modules
+container-volume apps/api/node_modules
+container-volume apps/web/node_modules
+container-volume packages/ui/node_modules
+container-volume .pnpm-store
+```
+
+- With pnpm's default layout, per-package `node_modules` hold only
+  symlinks into the root `node_modules/.pnpm`, so the root line does
+  the heavy lifting — but the per-package lines are still worth having
+  (they hold `.bin` shims and any `node-linker=hoisted`/`npm`-style
+  real files), and they cost nothing.
+- `pnpm` needs its store on the same filesystem as the volume to
+  hardlink into it, so a `.pnpm-store` inside the worktree must be
+  shadowed too (or moved out of the tree with `store-dir`); otherwise
+  it falls back to copying or fails with `ENOENT … copyfile`.
+- Inside the container, a shadowed directory is a mountpoint, so
+  `rm -rf node_modules` fails with `Device or resource busy`. Clear its
+  *contents* instead: `find node_modules -mindepth 1 -delete`, then
+  reinstall. Cleanup scripts that end with `rm -rf node_modules` need
+  the same change.
+- Volumes are per worktree, so each worktree's container installs its
+  own dependencies once; `ruori rebuild` keeps them, `ruori rm` removes
+  them.
 
 ## Recipe: Claude Code auth
 
@@ -491,14 +569,16 @@ than the developer's own host namespace.
 | `container-port` | n/a (env injection) | fresh, every container start | an env var in the container process — **never written to any file** |
 | `container-copy` | host → container | once, only at container **creation** | a private, writable copy inside the container's own filesystem |
 | `container-host-port` | host → container (reverse of `container-port`) | fresh, every transition to running | a `socat` process inside the container — **never written to any file** |
-| `container-volume` | n/a (storage swap, not a copy) | once, at container **creation** | that one subpath backed by a Docker volume on native storage — starts **empty**, never touches the host |
+| `container-volume` | n/a (storage swap, not a copy) | once, at container **creation** (`ruori rebuild` to apply an added/removed line) | that one subpath backed by a Docker volume on native storage — starts **empty**, never touches the host |
 
 `container-volume` looks similar to `container-copy` but does the
 opposite kind of thing: `container-copy` puts a host file's *contents*
 into the container once; `container-volume` gives an *empty* subpath
 its own storage and never reads anything from the host at all — you
 still populate it yourself from inside the container (e.g. `pnpm
-install`), same as you would without the directive.
+install`), same as you would without the directive. Unlike `copy`, it
+takes an exact path, never a glob — see "Host-side tooling and
+generated directories" above for why.
 
 If your app reads its assigned port from a `.env` file rather than an
 env var, `container-port` alone won't get it there — write a small

@@ -114,7 +114,7 @@ and gives each concurrently-open worktree its own free host port
 instead of colliding on the same one. Every repo `ruori` is set up for
 gets this.
 
-Five directives go in the same `.ruori.conf` from step 2:
+Six directives go in the same `.ruori.conf` from step 2:
 
 - **`container on`** — activates it. (Bare `container`, i.e. no value,
   also works.) Always include this line — it's what turns the rest of
@@ -147,6 +147,21 @@ Five directives go in the same `.ruori.conf` from step 2:
   `socat` relay there to `host.docker.internal:<port>` on the host —
   see the next bullet for when this applies. Requires `socat` in the
   Dockerfile.
+- **`container-volume <relative-path>`** — repeatable. Gives a subpath
+  of the worktree its own Docker volume inside the container instead
+  of sharing the host's directory. The worktree is a live bind mount
+  and the container is Linux while the host is macOS, so anything the
+  toolchain *generates per platform* must not be shared: native
+  binaries in `node_modules`, compiled build output, a `.pnpm-store`, a
+  Rust `target/`, a Python venv. Add one exact line per such directory
+  — no globs. Read the repo's `.gitignore` and workspace layout
+  (`pnpm-workspace.yaml`, `package.json` `workspaces`, etc.) and list
+  every generated directory you find, including each workspace
+  package's own `node_modules` (`apps/api/node_modules`,
+  `apps/web/node_modules`, ...). The user runs their own native install
+  on the host once per worktree for editor support; see "Host-side
+  tooling and generated directories" in the container sandbox guide,
+  which has a Node.js monorepo recipe.
 
 Ask the user what you need to draft (or verify an existing) Dockerfile
 — this part genuinely needs their input, unlike whether to do container
@@ -372,7 +387,9 @@ user:
 - The exact `copy` directives you're proposing, one line of reasoning
   each.
 - The exact `container`/`container-file`/`container-port`/
-  `container-copy`/`container-host-port` directives you're proposing,
+  `container-copy`/`container-host-port`/`container-volume` directives
+  you're proposing (for `container-volume`, name which generated
+  directories each line covers and why),
   and the full contents of the Dockerfile you're proposing to write
   (or, if one already exists at the target path, whether you're
   reusing it as-is or changing it, and why) — including the Claude Code

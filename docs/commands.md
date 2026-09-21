@@ -166,7 +166,13 @@ never re-copied into an already-running container — see
   anything pointing at the old port mapping keeps working.
 - Any `container-volume` native volumes are left alone — only the
   container object itself is disposable here; volume data survives a
-  rebuild the same way it survives a plain restart.
+  rebuild the same way it survives a plain restart. The directives
+  *are* re-read, though: this is how a `container-volume` line added
+  or removed since the container was created takes effect, since
+  Docker can't change the mounts of an existing container. `ruori`
+  prints `container-volume targets changed (+…); run 'ruori rebuild
+  <branch>' to apply` on a switch whenever that's pending; the new
+  subpaths start empty, the rest keep their data.
 - Confirms interactively first (`[y/N]`), since it discards whatever
   state lived only inside the old container.
 
