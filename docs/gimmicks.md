@@ -59,6 +59,23 @@ into it, so an in-tree `.pnpm-store` must be shadowed too. See
 `docs/container-sandbox-guide.md` "Host-side tooling and generated
 directories".
 
+### The host-side install is the user's own concern — ruori tracks nothing about it
+
+**Fact.** Once generated directories are container-only, the host
+editor needs its own install, and it's easy to forget in a fresh
+worktree. Three ways for ruori to help were considered: a `host-setup
+<command>` directive run on `ruori new`/on demand (makes `.ruori.conf`
+execute repo-controlled commands on the host); a nudge in the picker
+preview/`details`/activation derived from which `container-volume`
+directories are empty on the host (implemented, then reverted the same
+hour); and a per-repo git `post-checkout` hook. **Decision.** None of
+them. ruori orchestrates the container side only and keeps no notion
+of host-side state; the host install is a documented step in the
+sandbox guide, nothing more. Ecosystem-specific ways to avoid it
+(pnpm/Yarn `supportedArchitectures` fetching several platforms into
+one tree) were tested and work, but are deliberately not part of the
+setup guidance for now — they're per package manager, not general.
+
 ### Bind mounts must sit at identical host and container paths
 
 **Fact.** A linked worktree's `.git` is a pointer *file* containing an
