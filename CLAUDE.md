@@ -71,7 +71,15 @@ change:
    one of the two bind mounts) so a repo's own image can persist or
    live-share state across every worktree's container for that repo —
    see `docs/container-sandbox-guide.md`'s "Recipe: Claude Code auth"
-   for the motivating use case.
+   for the motivating use case. The worktree is one live bind mount;
+   `container-volume` carves per-platform generated directories
+   (`node_modules`, build output) out of it into container-only Docker
+   volumes. Its patterns resolve against git-tracked directories
+   (`container_volume_relpaths`), never the filesystem, so they work on
+   a fresh worktree; since Docker can't change an existing container's
+   mounts, `warn_container_volume_drift` tells the user when a `ruori
+   rebuild` is needed. See that guide's "Host-side tooling and generated
+   directories" for the model.
 5. **Port allocation** (`allocate_port_for`/`ports_cache_file`) — a
    separate mechanism from env-file copying: ports are injected as
    container env vars, never written to a file, and are seeded
