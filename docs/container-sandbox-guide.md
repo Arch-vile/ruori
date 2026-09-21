@@ -296,16 +296,27 @@ equivalent.
 
 ## Recipe: GitHub CLI (`gh`) auth
 
-`gh` stores its login as a plain file — `~/.config/gh/hosts.yml` (or
-`$GH_CONFIG_DIR/hosts.yml` if you've set that env var) — with no
-OS-keychain involvement, so it fits the copy-in model above exactly
-like the Claude Code credentials example does.
+`gh` *can* store its login as a plain file — `~/.config/gh/hosts.yml`
+(or `$GH_CONFIG_DIR/hosts.yml` if you've set that env var) — which fits
+the copy-in model above exactly like the Claude Code credentials
+example does. **But check first:** on macOS, `gh auth login` defaults
+to storing the token in the OS Keychain instead, in which case
+`hosts.yml` only holds a reference to it, not the token itself, and
+`container-copy` (which only ever reads a host **file**) copies in
+something that won't actually authenticate. Run `gh auth status` — a
+`(keyring)` suffix means you're in this situation. Force plain-file
+storage instead by adding `--insecure-storage` to any `gh auth login`
+below; the name is accurate; see the security note after "Separate
+identities" below before doing this to your main, daily-driver login.
 
 **Single identity, simplest case:**
 
 ```
 container-copy ~/.config/gh/hosts.yml
 ```
+
+(add `--insecure-storage` to whatever `gh auth login` produced this
+host's `hosts.yml` if `gh auth status` showed `(keyring)`.)
 
 Every worktree's container for this repo now has `gh` already
 authenticated the moment it's created — no `gh auth login` inside the
@@ -316,9 +327,16 @@ auth switch` on the host:** use `gh`'s own `GH_CONFIG_DIR` to keep each
 identity in its own directory on the host, once:
 
 ```sh
-GH_CONFIG_DIR=~/.config/gh-work     gh auth login
-GH_CONFIG_DIR=~/.config/gh-personal gh auth login
+GH_CONFIG_DIR=~/.config/gh-work     gh auth login --insecure-storage
+GH_CONFIG_DIR=~/.config/gh-personal gh auth login --insecure-storage
 ```
+
+`--insecure-storage` forces the token itself into that directory's
+`hosts.yml` as plain text — instead of the OS keychain — which is what
+makes `container-copy` (below) actually work, at the cost of the token
+sitting in cleartext at that path on your host, not just inside the
+container. This is exactly why you're using a separate,
+narrowly-scoped login for this rather than your everyday `gh` identity.
 
 Then point a given repo's `.ruori.conf` at the identity it should use,
 mapped onto `gh`'s normal *default* location inside the container so
@@ -337,6 +355,98 @@ This is still a one-time snapshot (see above): if you rotate or
 re-`gh auth login` an identity, `docker rm -f` the affected
 container(s) so `ruori` re-copies it fresh. The same security note
 applies too — these are real, usable credentials once copied in.
+
+## Recipe: git commit identity
+
+A worktree's container gets no git identity of its own by default —
+`git commit` inside it fails outright:
+
+```
+*** Please tell me who you are.
+fatal: unable to auto-detect email address (got 'root@<container-id>.(none)')
+```
+
+This is a plain file (`~/.gitconfig`), no keychain involved, so it
+fits the copy-in model exactly:
+
+```
+container-copy ~/.gitconfig:/root/.gitconfig
+```
+
+The explicit `:/root/.gitconfig` target matters here — the container's
+`$HOME` is `/root`, not your host username's home directory, so the
+"same path as the host" default `container-copy` falls back to when
+you omit a target would land the file somewhere `git` never looks.
+This brings over `user.name`/`user.email` plus anything else in your
+gitconfig (aliases, `core.*`, etc.) as a one-time snapshot — same
+"edit the host file, then `docker rm -f`/recreate to pick it up"
+caveat as every other `container-copy` (see above).
+
+If you'd rather commits made inside the container be attributed to
+something other than your personal identity — the same
+dedicated-identity reasoning as the recipes above — skip this and bake
+a fixed identity into the Dockerfile instead:
+
+```dockerfile
+RUN git config --system user.name "ruori agent" \
+ && git config --system user.email "agent@example.invalid"
+```
+
+## Recipe: `git push`/`pull` fails over an SSH remote from inside the container
+
+Most minimal base images ship no `ssh` client at all, so a remote like
+`git@github.com:org/repo.git` fails outright the moment git tries to
+shell out to it:
+
+```
+error: cannot run ssh: No such file or directory
+fatal: unable to fork
+```
+
+As noted at the top of this guide, agent-forwarded SSH isn't something
+`ruori` sets up. Rather than installing `openssh-client` and
+`container-copy`-ing a raw private key in, reuse the `gh` recipe above
+for authentication instead, and have git transparently treat
+SSH-style GitHub URLs as HTTPS ones — the remote itself, in
+`.git/config`, never has to change from `git@github.com:...` to
+`https://...`, on the host or anywhere else, since that config is
+shared across every worktree (see "Per-repo state files" in
+`CLAUDE.md`).
+
+1. **Install `gh` in the image** — it's not in Debian's default repos,
+   so this is GitHub's own apt-repo install recipe (adjust for a
+   different base image):
+
+   ```dockerfile
+   RUN (curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg) \
+       && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+       && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
+       && apt-get update && apt-get install -y --no-install-recommends gh \
+       && rm -rf /var/lib/apt/lists/*
+   ```
+
+2. **Wire git's credential helper to `gh`, and rewrite SSH-style GitHub
+   URLs to HTTPS — both with `--system`, not `--global`.** A
+   `container-copy ~/.gitconfig:/root/.gitconfig` line (previous
+   recipe) overwrites `/root/.gitconfig` — the `--global` file — with
+   your host's own gitconfig on every container creation, which would
+   silently wipe out either setting if it were put there instead.
+   `--system` writes to `/etc/gitconfig`, baked into the image at
+   build time and untouched by that copy:
+
+   ```dockerfile
+   RUN git config --system credential.https://github.com.helper "!gh auth git-credential" \
+       && git config --system url."https://github.com/".insteadOf "git@github.com:"
+   ```
+
+   The `credential.helper` line makes `gh` supply the token from
+   whichever `hosts.yml` you `container-copy`'d in (see the `gh` recipe
+   above — check whether you need `--insecure-storage` there first).
+   The `insteadOf` line is what avoids ever touching the real remote:
+   git rewrites `git@github.com:...` to `https://github.com/...` for
+   any operation, but only inside processes that read this container's
+   `/etc/gitconfig` — your host's own git, and `.git/config` itself,
+   are untouched, so SSH keeps working there exactly as before.
 
 ## Recipe: `container-port` published but connection refused from the host
 
