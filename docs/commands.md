@@ -79,8 +79,9 @@ Keybindings:
   status, PR, usage, path, session) shown in a preview pane underneath
   it, same as the picker's own preview. Items: **switch to** (first, so
   it stays the fast path — see above), **delete worktree** (see
-  "Deleting a worktree" below), **open in browser** (container mode
-  only, and only when this worktree has at least one `:http`-typed
+  "Deleting a worktree" below), **open host terminal** (see "`ruori
+  terminal [branch-or-session]`" below), **open in browser** (container
+  mode only, and only when this worktree has at least one `:http`-typed
   `container-port` allocated — see the `container-port` directive in
   [container-sandbox-guide.md](container-sandbox-guide.md); prints a
   clickable `http://localhost:<host-port>` link per such port rather
@@ -195,6 +196,28 @@ container mode) Docker state/container id/image/ports. One `URL:` line
 per `:http`-typed `container-port` with a host port allocated, each a
 clickable `http://localhost:<host-port>` link — omitted entirely if
 there are none.
+
+## `ruori terminal [branch-or-session]`
+
+Opens a brand-new iTerm2 window with a plain login shell rooted at that
+worktree — always on the host, even in [container
+mode](container-sandbox-guide.md), unlike the tmux-attached (and, in
+container mode, containerized) window the manager loop itself opens.
+This is what "Host-side tooling and generated directories" in the
+container sandbox guide means by running something "outside any
+`ruori` session": a native `pnpm install`, a one-off host-side `git`
+command, anything that needs to run on macOS rather than inside the
+worktree's Linux container.
+
+Same selector as `ruori details`/`ruori resources`: a branch or session
+name, or nothing to default to whichever worktree is "current" (the
+`*` marker). Unlike the manager loop's own iTerm2 window, this one
+isn't tracked or replaced by anything `ruori` does later — it's an
+ordinary iTerm2 window you open and close by hand, so opening several
+in a row piles up windows rather than reusing one.
+
+Same as picking "open host terminal" from the Enter menu on the
+highlighted row in the picker.
 
 ## `ruori ports`
 

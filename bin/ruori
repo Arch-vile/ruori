@@ -2405,6 +2405,37 @@ case "$cmd" in
     fi
     exit 0
     ;;
+  terminal)
+    # Same selector convention as `resources`: a branch or session name,
+    # or nothing to default to whichever worktree is "current" (the *
+    # marker) -- the common case being "give me a host shell on whatever
+    # I'm on right now", not naming a worktree explicitly.
+    session_arg="${2:-}"
+    found=-1
+    if [ -n "$session_arg" ]; then
+      for i in "${!paths[@]}"; do
+        session_name="$(session_name_for "${branches[$i]}" "${paths[$i]}")"
+        if [ "${branches[$i]}" = "$session_arg" ] || [ "$session_name" = "$session_arg" ]; then
+          found=$i
+          break
+        fi
+      done
+      if [ "$found" -lt 0 ]; then
+        echo "ruori: no worktree found for branch or session '$session_arg' (see 'ruori list')" >&2
+        exit 1
+      fi
+    else
+      for i in "${!paths[@]}"; do
+        if [ "${paths[$i]}" = "$current_worktree_path" ]; then
+          found=$i
+          break
+        fi
+      done
+      [ "$found" -ge 0 ] || found=0
+    fi
+    open_host_terminal_for "${paths[$found]}" "${branches[$found]}"
+    exit 0
+    ;;
   __fzfgen)
     # Hidden: invoked by the picker's own fzf `reload` binding (Ctrl-R,
     # Ctrl-N), not a user-facing command. Loads the PR/usage
@@ -2789,6 +2820,47 @@ EOF
   fi
 }
 
+# Opens a brand-new iTerm2 window with a plain login shell rooted at
+# $1 -- always on the host, even for a container-mode worktree, unlike
+# open_iterm_window_for's attach-into-tmux/-container window. This is
+# for the "host-side tooling" work docs/container-sandbox-guide.md
+# describes (a native `pnpm install`, one-off git commands, ...) that's
+# meant to run outside any ruori session entirely (see 'ruori terminal'
+# in docs/commands.md).
+#
+# Deliberately untracked by active_iterm_window_id: it's not "the"
+# managed window a switch replaces, just an extra one you open by hand
+# and close by hand, same as any other iTerm2 window.
+open_host_terminal_for() {
+  local target_path="$1" branch="$2"
+  local window_title="${repo_name}/${branch} (terminal)"
+  local script_path create_raw
+
+  script_path="$(mktemp -t ruori-terminal)"
+  log_file_write "$script_path"
+  cat >"$script_path" <<SCRIPT
+#!/bin/bash
+printf '\033]0;%s\007' "$window_title"
+# Unlinking here (rather than after, as open_iterm_window_for does)
+# because the exec below never returns to run a later line -- bash has
+# already read this short script into its buffer by the time it gets
+# here, so the unlink is safe.
+rm -f "$script_path"
+cd "$target_path" || exit 1
+exec "\${SHELL:-/bin/bash}" -l
+SCRIPT
+  chmod +x "$script_path"
+
+  create_raw="$(osascript 2>&1 <<EOF
+tell application "iTerm2"
+  activate
+  create window with default profile command "${script_path}"
+end tell
+EOF
+  )"
+  log_iterm "open_host_terminal_for: branch=${branch} path=${target_path} osascript_output=${create_raw:-<empty>}"
+}
+
 # Everything a pick (or a freshly created worktree, see 'new' above) needs
 # to become "the active worktree": env-file copy-in, tmux/container session
 # start-or-reuse, VS Code, iTerm2 window, and persisting it as current for
@@ -2956,7 +3028,7 @@ while true; do
   # browser_links_for) -- no point offering it for host mode, a repo
   # with no ":http" ports, or a worktree whose container has never
   # started (nothing allocated yet).
-  menu_items=("switch to" "delete worktree")
+  menu_items=("switch to" "delete worktree" "open host terminal")
   if [ "$CONTAINER_MODE" = "1" ]; then
     if [ -n "$(browser_links_for "$session_name")" ]; then
       menu_items+=("open in browser")
@@ -2981,6 +3053,9 @@ while true; do
       ;;
     "delete worktree")
       delete_worktree "$selected_path" "$selected_branch" "$session_name"
+      ;;
+    "open host terminal")
+      open_host_terminal_for "$selected_path" "$selected_branch"
       ;;
     "open in browser")
       while IFS=$'\t' read -r link_label link_url; do
