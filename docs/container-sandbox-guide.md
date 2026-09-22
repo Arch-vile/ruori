@@ -41,9 +41,10 @@ it into a container** — one container per worktree. Specifically:
   makes container mode work with any agent (or no agent) without
   `ruori` needing to know or care which one. If you *do* want something
   started automatically, repeatable `container-command` directives
-  (below) each get their own tmux pane in a fresh session — e.g. an
-  agent in one pane and `npm run dev` in another, side by side, every
-  time a worktree's container starts from scratch.
+  (below) each get their own tmux *window* in a fresh session — e.g. an
+  agent in one window and `npm run dev` in another, switchable with
+  Ctrl-b `<number>`, every time a worktree's container starts from
+  scratch.
 - The app's dev server, the agent, and any ad-hoc commands all run in
   that *same* container — there's no separate "app container," and
   the agent is never given access to the Docker socket (that would be
@@ -161,17 +162,17 @@ with none of these behaves exactly as it does today.
 
 - **`container-command <cmd>`** — repeatable, one per command to run
   automatically in a freshly created session, each in its own tmux
-  pane. Only applies the moment a worktree's session is created from
+  *window* (switchable with Ctrl-b `<number>`, or Ctrl-b `w` for the
+  window list — not a split pane, so each command gets the full
+  screen). Only applies the moment a worktree's session is created from
   scratch (same as `host-command` in host mode — see
   `docs/config-file.md`); resuming an already-running session never
-  re-sends these, so they won't duplicate panes on every switch. The
-  first directive starts the session itself; each further one splits
-  into a new pane of that same session, and `ruori` tiles the layout
-  once they're all up so e.g. an agent and a dev server land side by
-  side instead of stacked:
+  re-sends these, so they won't duplicate windows on every switch. The
+  first directive starts the session itself (window 0); each further
+  one opens as the next window:
 
   ```
-  # .ruori.conf — agent in one pane, dev server in another
+  # .ruori.conf — agent in one window, dev server in another
   container-command claude --resume
   container-command npm run dev
   ```

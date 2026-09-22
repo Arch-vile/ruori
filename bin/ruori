@@ -446,13 +446,13 @@ container_file_path() {
 }
 
 # One "<cmd>" line per `container-command <cmd>` directive, in config
-# order. Each becomes its own tmux pane in a freshly created container
-# session (see activate_worktree) instead of the bare shell container
-# mode starts by default -- opt-in, repeatable, so a repo can line up
-# e.g. an agent and a dev server side by side on every fresh session.
-# With no `container-command` lines, container mode stays exactly as
-# agent-agnostic as before: no command injected at all (see
-# docs/container-sandbox-plan.md).
+# order. Each becomes its own tmux window in a freshly created container
+# session (see activate_worktree) -- switchable with Ctrl-b <number> --
+# instead of the bare shell container mode starts by default -- opt-in,
+# repeatable, so a repo can line up e.g. an agent and a dev server as
+# separate windows on every fresh session. With no `container-command`
+# lines, container mode stays exactly as agent-agnostic as before: no
+# command injected at all (see docs/container-sandbox-plan.md).
 container_commands() {
   local key value
   while IFS=$'\t' read -r key value; do
@@ -2955,20 +2955,20 @@ activate_worktree() {
       container_cmds="$(container_commands)"
       if [ -n "$container_cmds" ]; then
         # `container-command` directives (opt-in, repeatable): the first
-        # one starts the session itself, each further one splits into a
-        # new pane of that same session -- tiled once they're all up, so
-        # e.g. an agent and a dev server land side by side rather than
-        # stacked in whatever split-window's default direction is.
+        # one starts the session itself, each further one gets its own
+        # new *window* in that same session -- switchable with the usual
+        # Ctrl-b <number> (or Ctrl-b w) -- not a split pane, so e.g. an
+        # agent and a dev server each get the full screen and you flip
+        # between them rather than sharing it.
         while IFS= read -r cmd; do
           [ -n "$cmd" ] || continue
           if [ "$first_cmd" = "1" ]; then
             docker exec "$session_name" tmux new-session -d -s "$session_name" -c "$target_path" "$cmd"
             first_cmd=0
           else
-            docker exec "$session_name" tmux split-window -t "$session_name" -c "$target_path" "$cmd"
+            docker exec "$session_name" tmux new-window -t "$session_name" -c "$target_path" "$cmd"
           fi
         done <<<"$container_cmds"
-        docker exec "$session_name" tmux select-layout -t "$session_name" tiled >/dev/null 2>&1
       else
         # No command is ever sent in here — whatever starts (an agent, a
         # shell, nothing) is entirely up to the container image's own
