@@ -65,8 +65,9 @@ change:
    iTerm2 attach). `ruori` only orchestrates the container's lifecycle
    (build/start/stop, mounts, port allocation, one-time copy-in on
    creation) — it never decides what runs inside the tmux session
-   started inside it, unlike host mode which hardcodes `claude --resume`
-   for a brand-new session. Every container also gets `RUORI_SHARED_DIR`
+   started inside it, same as host mode: a brand-new session is a plain
+   shell unless the repo's `.ruori.conf` sets `host-command` (see
+   `docs/config-file.md`). Every container also gets `RUORI_SHARED_DIR`
    (an env var pointing at a subdirectory of the common git dir, already
    one of the two bind mounts) so a repo's own image can persist or
    live-share state across every worktree's container for that repo —

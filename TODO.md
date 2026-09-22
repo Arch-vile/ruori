@@ -1,9 +1,10 @@
 # ruori — Next steps
 
 Status: MVP works (`bin/ruori list`, `bin/ruori switch`) — fzf-pick a git worktree,
-create/reuse a tmux session running `claude --resume`, launch/focus VS Code,
-and pop an iTerm2 window for the session, looping back to the picker so the
-invoking terminal stays a persistent manager. See README.md for usage.
+create/reuse a tmux session (running `host-command` if configured, a
+plain shell otherwise), launch/focus VS Code, and pop an iTerm2 window
+for the session, looping back to the picker so the invoking terminal
+stays a persistent manager. See README.md for usage.
 
 Section 1's bugs are fixed. The manager-loop / iTerm2-window / claude
 --resume behavior above was also just implemented (per live user feedback,
@@ -83,11 +84,14 @@ Done: `.ruori.conf` exists (simple line-based, `<directive>
 `copy` directive for which files get copied into a new worktree, and
 (see #2 above) `container`/`container-file`/`container-port`/
 `container-copy` for opting a repo into container mode.
-Still to add, as new directives in the same file: editor override
-(`code` vs `cursor` vs other), tmux post-create command in host mode
-(currently hardcoded to `claude --resume` — container mode has no such
-hardcoding at all, since `ruori` never injects a command into a
-container's tmux session, see README.md "Container mode").
+
+Done: tmux post-create command in host mode is no longer hardcoded to
+`claude --resume` — a brand-new session is a plain shell unless
+`.ruori.conf` sets `host-command`, matching container mode's
+already-agnostic behavior (see docs/config-file.md).
+
+Still to add, as a new directive in the same file: editor override
+(`code` vs `cursor` vs other).
 
 ## Explicitly out of scope for now
 

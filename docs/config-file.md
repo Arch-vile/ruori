@@ -31,8 +31,9 @@ rather than breaking the file. This shape is deliberate: the same file
 will grow more kinds of setting later (editor override, port range
 base — see TODO.md) without needing a new format.
 
-The only directive outside container mode is `copy`, for which
-gitignored files get copied into a new worktree if it's missing them:
+Two directives apply outside container mode: `copy` and `host-command`.
+
+`copy` is for gitignored files that get copied into a new worktree if it's missing them:
 the value is a glob pattern relative to the repo root. A plain filename
 matches exactly (an exact path, `config/local.json`, works too); shell
 wildcards (`*`, `?`, `[...]`) work as well, including partway through a
@@ -53,6 +54,16 @@ You (or an AI coding agent — this page is a fine thing to point one at
 directly) can generate this file for a given repo: inspect that repo's
 `.gitignore`/config and write a sensible `.ruori.conf` from the format
 above.
+
+`host-command <cmd>` sets what a brand-new host-mode tmux session runs
+on creation. With no `host-command` line, a new session is just a
+plain shell — `ruori` doesn't assume every user wants an AI agent
+auto-started:
+
+```
+# .ruori.conf — start Claude Code's own resume picker in new host sessions
+host-command claude --resume
+```
 
 Seven more directives opt a repo into **container mode**: `container`,
 `container-file`, `container-port`, `container-copy`,
