@@ -371,7 +371,7 @@ config_directives_prime
 # each new accessor (container_mode_enabled, container_file_path,
 # container_ports, container_copy_entries) matches only its own key(s),
 # so this is the single shared place unrecognized keys get flagged.
-KNOWN_CONFIG_DIRECTIVES="copy host-command container container-file container-port container-copy container-host-port container-volume container-overlay"
+KNOWN_CONFIG_DIRECTIVES="copy host-command container container-file container-port container-copy container-host-port container-volume container-overlay container-command"
 
 warn_unknown_directives() {
   local key value known k
@@ -443,6 +443,23 @@ container_file_path() {
     [ "$key" = "container-file" ] && [ -n "$value" ] && result="$value"
   done < <(config_directives)
   printf '%s' "$result"
+}
+
+# One "<cmd>" line per `container-command <cmd>` directive, in config
+# order. Each becomes its own tmux window in a freshly created container
+# session (see activate_worktree) -- switchable with Ctrl-b <number> --
+# instead of the bare shell container mode starts by default -- opt-in,
+# repeatable, so a repo can line up e.g. an agent and a dev server as
+# separate windows on every fresh session. With no `container-command`
+# lines, container mode stays exactly as agent-agnostic as before: no
+# command injected at all (see docs/container-sandbox-plan.md).
+container_commands() {
+  local key value
+  while IFS=$'\t' read -r key value; do
+    [ "$key" = "container-command" ] || continue
+    [ -n "$value" ] || continue
+    printf '%s\n' "$value"
+  done < <(config_directives)
 }
 
 # One "<container-port>\t<name>\t<type>" line per `container-port
@@ -2934,11 +2951,31 @@ activate_worktree() {
     if docker exec "$session_name" tmux has-session -t "$session_name" 2>/dev/null; then
       echo "ruori: resuming existing session for ${target_branch}"
     else
-      # No command is ever sent in here — whatever starts (an agent, a
-      # shell, nothing) is entirely up to the container image's own
-      # CMD/entrypoint or tmux default-command. See
-      # docs/container-sandbox-plan.md decision on agent-agnosticism.
-      docker exec -d "$session_name" tmux new-session -d -s "$session_name" -c "$target_path"
+      local container_cmds cmd first_cmd=1
+      container_cmds="$(container_commands)"
+      if [ -n "$container_cmds" ]; then
+        # `container-command` directives (opt-in, repeatable): the first
+        # one starts the session itself, each further one gets its own
+        # new *window* in that same session -- switchable with the usual
+        # Ctrl-b <number> (or Ctrl-b w) -- not a split pane, so e.g. an
+        # agent and a dev server each get the full screen and you flip
+        # between them rather than sharing it.
+        while IFS= read -r cmd; do
+          [ -n "$cmd" ] || continue
+          if [ "$first_cmd" = "1" ]; then
+            docker exec "$session_name" tmux new-session -d -s "$session_name" -c "$target_path" "$cmd"
+            first_cmd=0
+          else
+            docker exec "$session_name" tmux new-window -t "$session_name" -c "$target_path" "$cmd"
+          fi
+        done <<<"$container_cmds"
+      else
+        # No command is ever sent in here — whatever starts (an agent, a
+        # shell, nothing) is entirely up to the container image's own
+        # CMD/entrypoint or tmux default-command. See
+        # docs/container-sandbox-plan.md decision on agent-agnosticism.
+        docker exec -d "$session_name" tmux new-session -d -s "$session_name" -c "$target_path"
+      fi
     fi
     # Visual "you're on a container" cue (issue #30): color this
     # session's tmux status bar, so it shows in *any* terminal attached

@@ -90,6 +90,13 @@ Done: tmux post-create command in host mode is no longer hardcoded to
 `.ruori.conf` sets `host-command`, matching container mode's
 already-agnostic behavior (see docs/config-file.md).
 
+Done: container mode's own equivalent, `container-command` (issue
+#45) — repeatable, each value gets its own tmux window in a freshly
+created session (switchable with Ctrl-b `<number>`), an agent and a
+dev server as separate windows, say. Still opt-in/agnostic by
+default: no `container-command` lines means the bare-session behavior
+above, unchanged (see docs/container-sandbox-guide.md).
+
 Still to add, as a new directive in the same file: editor override
 (`code` vs `cursor` vs other).
 

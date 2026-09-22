@@ -32,13 +32,19 @@ it into a container** — one container per worktree. Specifically:
   instead of the bind-mounted worktree. See "Host-side tooling and
   generated directories" below for why you want that for anything a
   toolchain generates per platform.
-- **`ruori` never decides what runs inside the container's tmux session.**
-  It only creates a *bare* tmux session and attaches iTerm2 to it —
-  no command is ever injected. Whatever starts (an agent, a plain
-  shell, nothing at all) is entirely up to your own container image:
-  its `CMD`/`ENTRYPOINT`, a tmux `default-command`, or you typing it by
-  hand after attaching. This makes container mode work with any agent
-  (or no agent) without `ruori` needing to know or care which one.
+- **`ruori` doesn't decide what runs inside the container's tmux session
+  unless you tell it to.** By default it only creates a *bare* tmux
+  session and attaches iTerm2 to it — no command is ever injected.
+  Whatever starts (an agent, a plain shell, nothing at all) is entirely
+  up to your own container image: its `CMD`/`ENTRYPOINT`, a tmux
+  `default-command`, or you typing it by hand after attaching. This
+  makes container mode work with any agent (or no agent) without
+  `ruori` needing to know or care which one. If you *do* want something
+  started automatically, repeatable `container-command` directives
+  (below) each get their own tmux *window* in a fresh session — e.g. an
+  agent in one window and `npm run dev` in another, switchable with
+  Ctrl-b `<number>`, every time a worktree's container starts from
+  scratch.
 - The app's dev server, the agent, and any ad-hoc commands all run in
   that *same* container — there's no separate "app container," and
   the agent is never given access to the Docker socket (that would be
@@ -57,7 +63,7 @@ matches the color of that worktree's `BRANCH` column in the picker.
 There's nothing to configure, and a host-mode worktree shows no color
 at all.
 
-## The seven directives
+## The eight directives
 
 Add these to `.ruori.conf` at the main worktree's root (same
 file the `copy` directive already lives in — see
@@ -154,8 +160,26 @@ with none of these behaves exactly as it does today.
   'ruori rebuild <branch>' to apply` when a directive was added or
   removed since that container was created.
 
-There is **no directive that launches an agent** — see "what container
-mode does and doesn't sandbox" above for why.
+- **`container-command <cmd>`** — repeatable, one per command to run
+  automatically in a freshly created session, each in its own tmux
+  *window* (switchable with Ctrl-b `<number>`, or Ctrl-b `w` for the
+  window list — not a split pane, so each command gets the full
+  screen). Only applies the moment a worktree's session is created from
+  scratch (same as `host-command` in host mode — see
+  `docs/config-file.md`); resuming an already-running session never
+  re-sends these, so they won't duplicate windows on every switch. The
+  first directive starts the session itself (window 0); each further
+  one opens as the next window:
+
+  ```
+  # .ruori.conf — agent in one window, dev server in another
+  container-command claude --resume
+  container-command npm run dev
+  ```
+
+  With no `container-command` lines, container mode is exactly as
+  agent-agnostic as it always was — a bare tmux session, nothing
+  injected.
 
 ## Automatic environment: `RUORI_SHARED_DIR`
 
