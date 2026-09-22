@@ -683,11 +683,28 @@ container_overlay_refresh_one() {
 # mount or the common-git-dir bind mount, both of which are also Type
 # "bind" and can also land under "$path/..." for the main worktree
 # (whose common dir is "$path/.git").
+#
+# On Docker Desktop for Mac, `docker inspect` sometimes reports a bind
+# mount's Source through the VM's raw view, prefixed with "/host_mnt"
+# (e.g. "/host_mnt/Users/..." instead of "/Users/..."), rather than the
+# plain host path ruori itself passed to `-v`. Observed specifically
+# for the overlay mount, which is a subpath of the common-git-dir mount
+# that's *also* separately bind-mounted whole into every container --
+# every worktree of a repo shares one common dir, so with more than one
+# worktree's container running at once (the normal case), a new
+# container's overlay mount can be nested inside a host path another,
+# already-running container has mounted too; a container created with
+# no such overlap in play doesn't show it. Left unstripped, this makes
+# a correctly-mounted overlay look "missing" -- a false positive, not
+# real drift. Stripping a leading "/host_mnt" (a no-op where it's
+# absent) before matching fixes this regardless of the exact trigger.
+# See docs/gimmicks.md.
 warn_container_overlay_drift() {
   local name="$1" path="$2" branch="$3" overlay_dir want have missing extra
   overlay_dir="$(container_overlay_state_dir)" || return 0
   want="$(container_overlay_entries | cut -f1 | sort -u)"
   have="$(docker inspect -f '{{range .Mounts}}{{if eq .Type "bind"}}{{.Source}}{{"\t"}}{{.Destination}}{{"\n"}}{{end}}{{end}}' "$name" 2>/dev/null \
+    | sed 's|^/host_mnt/|/|' \
     | awk -F'\t' -v d="$overlay_dir/" 'index($1,d)==1{print $2}' \
     | sed -n "s|^${path}/||p" | sort -u)"
   [ "$want" = "$have" ] && return 0

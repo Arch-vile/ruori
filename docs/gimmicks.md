@@ -140,6 +140,43 @@ same "delete to refresh" model `container-copy` already uses. See
 block, and the guide's "`container-overlay` applies a patch at
 container creation, not a live link".
 
+### `docker inspect` can report a bind mount's Source through `/host_mnt` instead of the plain host path
+
+**Fact.** `warn_container_overlay_drift` tells a `container-overlay`
+mount apart from every other bind mount on the container by matching
+`docker inspect`'s reported `Source` against
+`container_overlay_state_dir()`'s plain host path as a string prefix.
+Verified against a real repo: for a container created while another,
+already-running container (a sibling worktree of the same repo — the
+normal case, since every worktree shares one common git dir, itself
+also bind-mounted whole into every container) already held that same
+host path mounted, Docker Desktop for Mac reported the *nested*
+overlay mount's `Source` prefixed with `/host_mnt/` (e.g.
+`/host_mnt/Users/...` instead of `/Users/...`) — the raw path from
+inside its Linux VM, not the host alias `ruori` itself passed to `-v`.
+A container created with no such mount overlap in play showed the
+plain path instead, for the exact same directive, same code path, same
+Docker Desktop instance. Left unhandled, the prefix mismatch makes a
+correctly-mounted overlay look "missing" — a false "container-overlay
+targets changed" warning right after the container it's warning about
+was just freshly created with that mount included.
+
+**Rejected.**
+- *Move the generated overlay file out from under the common-git-dir
+  mount, so no nested mount ever exists to trigger this.* Might avoid
+  this specific trigger, but the theory of *why* Docker Desktop does
+  this isn't fully pinned down (two data points, not a confirmed
+  mechanism) — relocating only pays off if that guess is complete and
+  exhaustive. It would also fight the "every per-repo state file lives
+  under `<git-common-dir>/ruori/`" decision elsewhere in this file,
+  losing the one-`rm -rf`-clears-everything property for no proven
+  gain.
+
+**Decision.** Strip a leading `/host_mnt/` from every reported bind
+`Source` before matching — a no-op where the prefix is absent, correct
+whether or not the nested-mount theory above is the complete
+explanation. (`warn_container_overlay_drift`.)
+
 ### `docker cp` neither creates parent directories nor copies a directory the way `cp` does
 
 **Fact.** `docker cp` fails with "Could not find the file <parent> in
