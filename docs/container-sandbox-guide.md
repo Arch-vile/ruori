@@ -299,7 +299,17 @@ container-volume .pnpm-store
 - `pnpm` needs its store on the same filesystem as the volume to
   hardlink into it, so a `.pnpm-store` inside the worktree must be
   shadowed too (or moved out of the tree with `store-dir`); otherwise
-  it falls back to copying or fails with `ENOENT … copyfile`.
+  it falls back to copying or fails with `ENOENT … copyfile`. This is
+  also why it only shows up as an in-tree, untracked `.pnpm-store` (and
+  a `git diff`-visible one, if not shadowed) inside the container and
+  not on the host: on the host, the worktree and pnpm's default global
+  store (`~/Library/pnpm/store`, `~/.local/share/pnpm/store`, …) are on
+  the same disk, so pnpm just hardlinks into the global store and never
+  needs a local fallback. Inside the container, the bind-mounted
+  worktree is a different filesystem from the container's own root fs
+  (where that default global-store path resolves to), so pnpm can't
+  hardlink across the boundary and falls back to a store next to
+  `node_modules` instead — inside the worktree, unless shadowed.
 - Inside the container, a shadowed directory is a mountpoint, so
   `rm -rf node_modules` fails with `Device or resource busy`. Clear its
   *contents* instead: `find node_modules -mindepth 1 -delete`, then
