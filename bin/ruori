@@ -371,7 +371,7 @@ config_directives_prime
 # each new accessor (container_mode_enabled, container_file_path,
 # container_ports, container_copy_entries) matches only its own key(s),
 # so this is the single shared place unrecognized keys get flagged.
-KNOWN_CONFIG_DIRECTIVES="copy container container-file container-port container-copy container-host-port container-volume container-overlay"
+KNOWN_CONFIG_DIRECTIVES="copy host-command container container-file container-port container-copy container-host-port container-volume container-overlay"
 
 warn_unknown_directives() {
   local key value known k
@@ -401,6 +401,18 @@ copy_patterns() {
     [ "$key" = "copy" ] || continue
     [ -n "$value" ] && printf '%s\n' "$value"
   done < <(config_directives)
+}
+
+# `host-command <cmd>` — what a brand-new host-mode tmux session runs on
+# creation. Empty/unset by default: a plain shell, matching container
+# mode's own agent-agnostic default (see docs/container-sandbox-plan.md
+# decision on agent-agnosticism).
+host_command() {
+  local key value result=""
+  while IFS=$'\t' read -r key value; do
+    [ "$key" = "host-command" ] && result="$value"
+  done < <(config_directives)
+  printf '%s' "$result"
 }
 
 # `container on` (bare `container`, i.e. an empty value, also works) is
@@ -2295,7 +2307,7 @@ case "$cmd" in
     resources_scope "Global"
     resources_none
     resources_scope "Repository"
-    resources_entry "$main_worktree_path/$CONFIG_FILENAME" "Yours to write and edit -- ruori never creates or modifies it, only reads it. Tells ruori which gitignored files to copy into a fresh worktree ('copy') and whether/how to run this repo in container mode ('container*' directives). Read fresh on every ruori invocation; see docs/config-file.md."
+    resources_entry "$main_worktree_path/$CONFIG_FILENAME" "Yours to write and edit -- ruori never creates or modifies it, only reads it. Tells ruori which gitignored files to copy into a fresh worktree ('copy'), what a brand-new host-mode tmux session runs ('host-command'), and whether/how to run this repo in container mode ('container*' directives). Read fresh on every ruori invocation; see docs/config-file.md."
     resources_entry "$main_worktree_path/$dockerfile_rel" "Yours to write, usually with a coding agent's help after 'ruori init' (see $common_dir/ruori/docs/new-repo-setup-guide.md above) -- ruori only reads it, to 'docker build' this repo's shared image. Only matters if $CONFIG_FILENAME has 'container on'; ruori never looks at it otherwise. Read (and rebuilt from) fresh on every container start, so editing it takes effect on your next switch."
     while IFS=$'\t' read -r overlay_relpath overlay_patchrel; do
       [ -n "$overlay_relpath" ] || continue
@@ -2947,10 +2959,12 @@ activate_worktree() {
       echo "ruori: resuming existing session for ${target_branch}"
     else
       tmux new-session -d -s "$session_name" -c "$target_path"
-      # No tmux session existed yet for this worktree, but Claude Code may
-      # still have a prior conversation on disk for this directory; --resume
-      # with no id opens its own picker (with an option to start fresh).
-      tmux send-keys -t "$session_name" 'claude --resume' C-m
+      # Plain shell unless the repo opts into something via `host-command`
+      # (see host_command above) — ruori doesn't assume every user wants
+      # Claude Code auto-started.
+      local host_cmd
+      host_cmd="$(host_command)"
+      [ -n "$host_cmd" ] && tmux send-keys -t "$session_name" "$host_cmd" C-m
     fi
   fi
 

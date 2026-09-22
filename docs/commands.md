@@ -14,9 +14,10 @@ fzf-pick one, and on each pick:
   `.ruori.conf`) from the main worktree into the target worktree if
   they're missing there (never overwrites an existing file)
 - creates (or reuses) a tmux session named `<repo>__<branch>__<hash>`
-  rooted in that worktree — a brand-new session starts `claude --resume`
-  (Claude's own picker: resume a past conversation for that directory,
-  or start fresh); an already-running session is left alone
+  rooted in that worktree — a brand-new session is a plain shell unless
+  the repo's `.ruori.conf` sets `host-command` (see
+  [config-file.md](config-file.md)); an already-running session is left
+  alone
 - opens/focuses a VS Code window rooted in that worktree
 - opens a **new iTerm2 window** attached to that tmux session
 
