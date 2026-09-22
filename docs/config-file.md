@@ -54,9 +54,9 @@ directly) can generate this file for a given repo: inspect that repo's
 `.gitignore`/config and write a sensible `.ruori.conf` from the format
 above.
 
-Six more directives opt a repo into **container mode**: `container`,
+Seven more directives opt a repo into **container mode**: `container`,
 `container-file`, `container-port`, `container-copy`,
-`container-host-port`, `container-volume`. See the
+`container-host-port`, `container-volume`, `container-overlay`. See the
 [container sandbox guide](container-sandbox-guide.md) for what they do
 and a worked example — a repo with none of them behaves exactly as
 described above.

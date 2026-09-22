@@ -61,3 +61,34 @@ child process it shells out to — `git`, `docker`, `code`, `fzf`,
 list --porcelain`'s own reads of `.git` internals never appear here,
 only `ruori`'s own reads/writes of files like `.ruori.conf` or the
 `ruori/` state files do.
+
+## Stale or failed `container-overlay`
+
+If a container's view of a `container-overlay`-managed file looks
+wrong or out of date, check two things, in order:
+
+1. **The warning `ruori` prints at switch time.** A patch that no
+   longer applies cleanly against the current host file prints `ruori:
+   warning: container-overlay for <relpath> failed to generate; ...` —
+   this means the container is either seeing the unmodified host file
+   (first-ever generation) or whatever the last successfully-generated
+   overlay was (a later `ruori rebuild` that hit a broken patch); it
+   never silently applies a half-merged result.
+2. **`<git-common-dir>/ruori/overlay.log`.** Append-only, same
+   convention as `iterm.log`/`file-io.log` above: one line per
+   patch-apply failure, naming the worktree, the relpath, and — when
+   `patch` left one — a `.rej` file sitting next to the generated file
+   under `<git-common-dir>/ruori/overlays/` (never inside the worktree
+   itself, so a broken patch never pollutes `git status`). Open the
+   `.rej` file to see exactly which hunk didn't match.
+
+Remember that `container-overlay` content is only ever generated once,
+at container creation or `ruori rebuild` — editing the host file or the
+patch file has no effect on an already-running container by design; see
+[container-sandbox-guide.md](container-sandbox-guide.md)'s
+"`container-overlay` applies a patch at container creation, not a live
+link". If the *set* of `container-overlay` directives changed (one
+added or removed) rather than their content, `ruori` prints
+`container-overlay targets changed (+…); run 'ruori rebuild <branch>'
+to apply` on the next switch instead — that's a different, unrelated
+message from the patch-failure warning above.

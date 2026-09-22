@@ -162,6 +162,19 @@ Six directives go in the same `.ruori.conf` from step 2:
   on the host once per worktree for editor support; see "Host-side
   tooling and generated directories" in the container sandbox guide,
   which has a Node.js monorepo recipe.
+- **`container-overlay <relpath> <patch-file>`** — repeatable. For a
+  tracked file that needs to look different **inside the container
+  only** — the flagship case is a dev server's bind host: a config
+  defaulting to `localhost` (Vite, and many others) binds the
+  container's own loopback interface, unreachable from outside it, and
+  needs `0.0.0.0` in container mode but should keep `localhost` for the
+  host workflow. Don't propose editing the tracked file directly (that
+  changes the host behavior too); instead have the user author a patch
+  against a scratch edit (`git diff -- <file> > .ruori/overlays/<name>.patch`,
+  then revert the tracked file) — see the "container-only file tweak"
+  recipe in the container sandbox guide for the exact steps. `ruori`
+  applies it fresh, against whatever the tracked file currently
+  contains, each time this repo's container is created or rebuilt.
 
 Ask the user what you need to draft (or verify an existing) Dockerfile
 — this part genuinely needs their input, unlike whether to do container
