@@ -890,6 +890,29 @@ container_id_for() {
   fi
 }
 
+# A curated set of xterm-256 color indices, picked bright/distinct
+# enough to read as both tmux status-bar background and picker
+# foreground text (see below), and different enough from each other
+# that a handful of worktrees stay visually distinguishable. Kept fairly
+# wide (16 entries) since the hash below has no collision-avoidance --
+# two containers landing on the same color is a coincidence you just
+# live with, same as port_seed_for's hash-derived starting port above;
+# a wider palette only makes that coincidence less likely, never
+# impossible, without a lookup file to actually guarantee uniqueness.
+CONTAINER_COLOR_PALETTE=(208 178 68 141 204 71 39 213 173 111 155 176 80 214 135 121)
+
+# Deterministically maps session $1 to one entry of the palette above,
+# so the same container always gets the same color across manager
+# restarts with no lookup file to keep in sync (issue #30) -- reusing
+# the cksum-hash idiom path_hash_for already uses for session naming.
+# Used to color both this container's tmux status bar (activate_worktree)
+# and its row in the picker (fzf_line_for), so the two visibly match.
+container_color_for() {
+  local session="$1" hash
+  hash="$(printf '%s' "$session" | cksum | cut -d' ' -f1)"
+  printf '%s' "${CONTAINER_COLOR_PALETTE[$((hash % ${#CONTAINER_COLOR_PALETTE[@]}))]}"
+}
+
 # Host->container port mappings actually allocated for session $1 (see
 # allocate_port_for/ports_cache_file), comma-separated, or "-" if none.
 container_ports_info_for() {
@@ -1837,6 +1860,21 @@ fzf_line_for() {
   fi
   pr="$(pr_status_for "${branches[$i]}")"
   usage="$(usage_cost_for "${paths[$i]}")"
+
+  # Branch column colored to match this session's tmux status-bar color
+  # (see container_color_for/activate_worktree) so the picker and the
+  # attached terminal carry the same per-container visual cue (issue
+  # #30) -- padded first so the invisible SGR bytes never throw off the
+  # column's fixed on-screen width; wrapped around the already-padded
+  # string keeps that width intact under --ansi, which fzf strips
+  # before measuring. No color at all when container mode is off, per
+  # the issue's ask.
+  local branch_field
+  branch_field="$(truncate_pad "${branches[$i]}" "$BRANCH_COL_WIDTH")"
+  if [ "$CONTAINER_MODE" = "1" ]; then
+    branch_field=$'\033[38;5;'"$(container_color_for "$session")"'m'"${branch_field}"$'\033[0m'
+  fi
+
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$i" \
     "$(marker_for "${paths[$i]}")" \
@@ -1844,7 +1882,7 @@ fzf_line_for() {
     "$(truncate_pad "$claude" "$CLAUDE_COL_WIDTH")" \
     "$(truncate_pad "$pr" "$PR_COL_WIDTH")" \
     "$(truncate_pad "$usage" "$USAGE_COL_WIDTH")" \
-    "$(truncate_pad "${branches[$i]}" "$BRANCH_COL_WIDTH")" \
+    "$branch_field" \
     "${paths[$i]}" "$session" "${branches[$i]}" "$image_info" "$ports_info" "$id_info" "$url_info"
 }
 
@@ -2274,7 +2312,7 @@ case "$cmd" in
     resources_scope "Worktree"
     resources_entry "$worktree_session" "Not a file, though 'tmux attach -t $worktree_session' works if you want to look. ruori creates this tmux session (or reuses it if already running) the moment you switch to this worktree; it keeps running in the background after you switch away, until 'ruori rm' or the picker's Enter menu ('delete worktree' or 'kill tmux') kills it."
     if container_mode_enabled; then
-      resources_entry "$worktree_session" "This worktree's Docker container -- same name as its tmux session above. Created by ruori the first time you switch to this worktree; stopped (not removed) when its tmux session is killed, and only actually removed by 'ruori rm'."
+      resources_entry "$worktree_session" "This worktree's Docker container -- same name as its tmux session above. Created by ruori the first time you switch to this worktree; stopped (not removed) when its tmux session is killed, and only actually removed by 'ruori rm'. ruori also colors that tmux session's status bar (a hash of the session name, see container_color_for) to match this worktree's row in the picker -- a visual cue that you're on a container, set on every switch, not something you configure."
       resources_entry "(recorded in $common_dir/ruori/ports, once allocated)" "Not something you manage directly -- see 'ruori ports' for this worktree's live host-port mapping, if its container has started at least once. Allocated by ruori the first time this worktree's container starts, and freed when the worktree is removed."
       native_volumes="$(docker volume ls -q --filter "name=^${worktree_session}__vol-" 2>/dev/null)"
       if [ -n "$native_volumes" ]; then
@@ -2885,6 +2923,20 @@ activate_worktree() {
       # docs/container-sandbox-plan.md decision on agent-agnosticism.
       docker exec -d "$session_name" tmux new-session -d -s "$session_name" -c "$target_path"
     fi
+    # Visual "you're on a container" cue (issue #30): color this
+    # session's tmux status bar, so it shows in *any* terminal attached
+    # to it -- the iTerm2 window below, but also a manual attach or a
+    # VS Code terminal -- not just something ruori's own window paints.
+    # status-bg/status-fg rather than the newer combined status-style,
+    # since they're understood by every tmux version status-style is
+    # (tmux aliases them internally) plus older ones a container image
+    # might still bundle. Set on every activation, not just on session
+    # creation, since it's cheap/idempotent and a session already
+    # running from before this feature existed would otherwise never
+    # pick it up. See container_color_for and fzf_line_for, which
+    # colors this same worktree's picker row to match.
+    docker exec "$session_name" tmux set-option -t "$session_name" status-bg "colour$(container_color_for "$session_name")" >/dev/null 2>&1
+    docker exec "$session_name" tmux set-option -t "$session_name" status-fg colour232 >/dev/null 2>&1
   else
     if tmux has-session -t "$session_name" 2>/dev/null; then
       echo "ruori: resuming existing session for ${target_branch}"
@@ -2975,7 +3027,7 @@ while true; do
   done
 
   selection="$(printf '%s' "$fzf_input" | fzf \
-    --delimiter='\t' --with-nth=2,3,4,5,6,7 --prompt="worktree > " --layout=reverse \
+    --ansi --delimiter='\t' --with-nth=2,3,4,5,6,7 --prompt="worktree > " --layout=reverse \
     --header-lines=1 \
     --header="enter: actions · ctrl-n: new worktree · ctrl-r: refresh · ctrl-f: fetch PR/usage" \
     --preview "$fzf_preview_cmd" \

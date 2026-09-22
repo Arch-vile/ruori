@@ -61,7 +61,9 @@ highlighting a row shows that worktree's full detail — branch
 (untruncated), tmux status, Claude status, PR status, usage cost, path,
 and tmux session name — in a preview pane underneath the list. See
 [dashboard-columns.md](dashboard-columns.md) for what each column means
-and how it's computed.
+and how it's computed. In container mode, `BRANCH` is also colored to
+match that worktree's tmux status-bar color — see [container sandbox
+guide](container-sandbox-guide.md)'s "Terminal color coding".
 
 The row marked `*` is whichever worktree you last switched to —
 starting from the main worktree, by default, on a repo with no `ruori`

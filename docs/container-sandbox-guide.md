@@ -44,6 +44,19 @@ it into a container** — one container per worktree. Specifically:
   the agent is never given access to the Docker socket (that would be
   close to root-equivalent on the host and defeats the point).
 
+## Terminal color coding
+
+Every container-mode worktree's tmux status bar gets a color,
+deterministically derived from its session name — the same container
+always gets the same color across restarts, and different containers
+usually get different colors from a small fixed palette. It's purely a
+visual "you're on a container, not the host" cue: it shows in *any*
+terminal attached to that tmux session (the iTerm2 window `ruori`
+opens, but also a manual `tmux attach` or an integrated terminal), and
+matches the color of that worktree's `BRANCH` column in the picker.
+There's nothing to configure, and a host-mode worktree shows no color
+at all.
+
 ## The seven directives
 
 Add these to `.ruori.conf` at the main worktree's root (same
