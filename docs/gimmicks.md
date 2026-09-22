@@ -85,6 +85,61 @@ exactly those same paths. **Decision.** `docker run -v "$path:$path"
 -v "$common_dir:$common_dir"`; git is a hard Dockerfile requirement.
 (`container_start_if_needed`; plan section D.)
 
+### A single-file bind mount's size gets stuck on Docker Desktop for Mac
+
+**Fact.** `container-overlay` needed a way to make one already-tracked
+file (`vite.config.js`, say) look different inside a container without
+touching the host's copy. The natural approach — write the patched
+content to a generated file, bind-mount it over the target path, and
+just rewrite that generated file in place whenever the host file
+changes, so an already-running container picks it up live — was
+implemented and then broken by a real, reproducible platform bug:
+verified empirically (mounttest repro, unrelated to any `ruori` code)
+that on Docker Desktop for Mac, a container's view of an individually
+file-bind-mounted path caches that file's byte length at whatever it
+last was when the container observed it. Overwriting the host side with
+**shorter or equal-length** content is picked up instantly, even from a
+brand-new `docker exec`. Overwriting with **longer** content is served
+silently truncated back to the old length — indefinitely, not just
+delayed; waiting doesn't fix it. A file reachable only through the
+*existing directory* bind mount (the worktree/common-dir mounts every
+container already has) never has this problem at any size — it's
+specific to a second, individual file mount layered on top.
+
+**Rejected.**
+- *Rewrite the generated file in place on every switch* (the original
+  design). Silently truncates the container's view on any edit that
+  makes the rendered content longer than it was at mount time — for a
+  patched config file, an edit growing it is the common case, not an
+  edge case. This is worse than doing nothing: no error, no log line,
+  just wrong content.
+- *Pad the generated file to a large fixed size up front, rewrite
+  content-plus-padding on refresh so the mount never observes a size
+  change.* Works (shrinking/same-size is always safe, confirmed by the
+  same repro), but only until real content exceeds the pad, at which
+  point it's the exact same silent-truncation failure one layer up, and
+  it's a genuinely surprising thing for a reader to find in the code
+  with no visible reason.
+- *`docker restart` on any length change to force Docker to
+  re-establish the mount.* Confirmed unnecessary once the actual
+  requirement was clarified (below) — and would have killed the tmux
+  session and everything running in it, the exact disruption `ruori`
+  exists to avoid.
+
+**Decision.** The actual requirement turned out to be narrower than
+"stay live-synced": a `container-overlay` patch only needs to reflect
+the *current* host file for a **new** container, not keep an
+already-running one in sync. So the generated file is written exactly
+once per container lifetime, in `container_start_if_needed`'s creation
+branch, **before** that container's `docker run` — the bind mount's
+very first observed size is already its final one, so the growth-cache
+bug has nothing to trigger on. Nothing refreshes it afterward; a
+host/patch-file change reaches a container only via `ruori rebuild`,
+same "delete to refresh" model `container-copy` already uses. See
+`container_overlay_refresh_one`, `container_start_if_needed`'s overlay
+block, and the guide's "`container-overlay` applies a patch at
+container creation, not a live link".
+
 ### `docker cp` neither creates parent directories nor copies a directory the way `cp` does
 
 **Fact.** `docker cp` fails with "Could not find the file <parent> in

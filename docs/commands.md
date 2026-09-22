@@ -173,6 +173,14 @@ never re-copied into an already-running container — see
   prints `container-volume targets changed (+…); run 'ruori rebuild
   <branch>' to apply` on a switch whenever that's pending; the new
   subpaths start empty, the rest keep their data.
+- This is also how a `container-overlay` directive added/removed since
+  the container was created reaches it (same drift check, printed as
+  `container-overlay targets changed (+…); run 'ruori rebuild
+  <branch>' to apply`), and how a change to the host file or patch file
+  behind an *existing* `container-overlay` entry gets picked up — that
+  content is only ever generated at container creation, never
+  refreshed for an already-running one. See
+  [container-sandbox-guide.md](container-sandbox-guide.md).
 - Confirms interactively first (`[y/N]`), since it discards whatever
   state lived only inside the old container.
 
