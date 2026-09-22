@@ -893,13 +893,18 @@ container_id_for() {
 # A curated set of xterm-256 color indices, picked bright/distinct
 # enough to read as both tmux status-bar background and picker
 # foreground text (see below), and different enough from each other
-# that a handful of worktrees stay visually distinguishable. Kept fairly
-# wide (16 entries) since the hash below has no collision-avoidance --
-# two containers landing on the same color is a coincidence you just
-# live with, same as port_seed_for's hash-derived starting port above;
-# a wider palette only makes that coincidence less likely, never
-# impossible, without a lookup file to actually guarantee uniqueness.
-CONTAINER_COLOR_PALETTE=(208 178 68 141 204 71 39 213 173 111 155 176 80 214 135 121)
+# that a handful of worktrees stay visually distinguishable. Deliberately
+# no greens/green-adjacent hues (see docs/gimmicks.md's "Container
+# terminal color coding" entry) -- tmux's own built-in default
+# status-bg is green, so a green palette entry would blend into an
+# unstyled status bar instead of standing out from it, defeating the
+# cue's whole point. Kept fairly wide (12 entries) since the hash below
+# has no collision-avoidance -- two containers landing on the same
+# color is a coincidence you just live with, same as port_seed_for's
+# hash-derived starting port above; a wider palette only makes that
+# coincidence less likely, never impossible, without a lookup file to
+# actually guarantee uniqueness.
+CONTAINER_COLOR_PALETTE=(208 178 68 141 204 39 213 173 111 176 214 135)
 
 # Deterministically maps session $1 to one entry of the palette above,
 # so the same container always gets the same color across manager

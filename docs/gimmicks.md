@@ -406,6 +406,19 @@ calls.
 render the text with inert escape bytes, so no capability check is
 needed. (`browser_links_for`.)
 
+## Container terminal color coding
+
+### The palette must avoid tmux's own default status-bar green
+
+**Fact.** tmux's built-in default `status-bg` is green. A palette
+color that's itself green-ish reads the same as an unstyled status
+bar at a glance, so a container could look indistinguishable from a
+plain host session — defeating the whole point of the cue (issue
+#30: make it obvious you're on a container). **Decision.**
+`CONTAINER_COLOR_PALETTE` (`container_color_for`) excludes every
+green/green-adjacent xterm-256 index, so any assigned color reads as
+clearly "colored" against tmux's own default.
+
 ## iTerm2
 
 ### Spawned processes don't inherit the login-shell `PATH`
