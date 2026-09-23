@@ -324,6 +324,22 @@ credential helper into `/etc/gitconfig` with `git config --system` at
 build time. (Guide "Recipe: `git push`/`pull` fails over an SSH
 remote".)
 
+### `container-init` must run after `container-copy`, not before
+
+**Fact.** Same root cause as the SSH-remote gotcha above: a
+`container-copy ~/.gitconfig:/root/.gitconfig` (the documented git
+identity recipe) overwrites the container's entire `~/.gitconfig`
+verbatim from the host's copy on every container creation — including
+anything an earlier-run setup step already put there. The gitignore
+recipe (`docs/container-sandbox-guide.md`'s "Recipe: container-only
+gitignore patterns") relies on a `container-init` command's `git
+config --global core.excludesFile ...` write surviving that. **Decision.**
+`container_init_commands_run` runs in `container_start_if_needed`'s
+"just created" branch strictly after the `container-copy` loop, so any
+`container-init` command is always free to depend on or override
+whatever `container-copy` set up, never the reverse.
+(`container_init_commands_run`.)
+
 ## Status and cost columns
 
 ### Hooks can only be baked into the repo's Dockerfile; the status file lives in the worktree
