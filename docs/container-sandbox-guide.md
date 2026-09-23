@@ -63,7 +63,7 @@ matches the color of that worktree's `BRANCH` column in the picker.
 There's nothing to configure, and a host-mode worktree shows no color
 at all.
 
-## The eight directives
+## The nine directives
 
 Add these to `.ruori.conf` at the main worktree's root (same
 file the `copy` directive already lives in — see
@@ -181,6 +181,29 @@ with none of these behaves exactly as it does today.
   agent-agnostic as it always was — a bare tmux session, nothing
   injected.
 
+- **`container-init <cmd>`** — repeatable, one per shell command to run
+  once via `docker exec`, only the moment this worktree's container is
+  first created — never on a later `docker start`, and deliberately
+  *after* any `container-copy` entries (see "Recipe: container-only
+  gitignore patterns" below for why ordering matters). Unlike
+  `container-command`, this doesn't open a tmux window and isn't tied
+  to a session at all — it's invisible one-time container setup, run
+  once per container lifetime regardless of how many tmux sessions come
+  and go inside it. Each command runs with the worktree's own path as
+  its working directory, so `$PWD` inside it resolves to the worktree
+  root without needing a dedicated env var:
+
+  ```
+  # .ruori.conf — point the container's git at a tracked ignore file
+  container-init git config --global core.excludesFile "$PWD/.devcontainer/container.gitignore"
+  ```
+
+  Deliberately generic rather than a directive per one-time setup
+  need — same trust level as `container-command`/`host-command`
+  (an arbitrary string from a human-authored `.ruori.conf`, run via a
+  shell). Editing the command list later needs `ruori rebuild <branch>`
+  to take effect, exactly like `container-copy`.
+
 ## Automatic environment: `RUORI_SHARED_DIR`
 
 Every container also gets one env var set automatically, no directive
@@ -279,6 +302,53 @@ on Docker Desktop for Mac, doesn't reliably reach an already-running
 container, which is exactly the failure mode "keep last-good, never
 silently corrupt" is designed to avoid running into.
 
+## Recipe: container-only gitignore patterns
+
+Container-side tooling sometimes produces artifacts (a stray build
+log, a lockfile variant only the container writes) that you want
+`git status`/`git add -A` *inside the container* to quietly ignore,
+without adding them to the repo's tracked `.gitignore` — that file is
+committed, so a change there is visible to every collaborator and to
+the host's own `git status` too.
+
+Since the worktree is already bind-mounted into the container, a
+plain, repo-tracked file needs no copying in — it's already visible at
+the same path. Point the container's git at it with `container-init`:
+
+```
+# .ruori.conf
+container on
+container-init git config --global core.excludesFile "$PWD/.devcontainer/container.gitignore"
+```
+
+```
+# .devcontainer/container.gitignore — ordinary gitignore syntax
+.pnpm-store
+*.local.log
+```
+
+`$PWD` resolves to the worktree root because `container-init` commands
+run with that as their working directory (see "The nine directives"
+above), so the value git stores is an absolute path — `core.excludesFile`
+resolved relative to the current directory at git's invocation time
+would break if git were ever run from a subdirectory. This only ever
+changes what *this container's* git reports; the host, and any other
+container, still see the exact same tracked `.gitignore` as before.
+
+Runs once, at container creation, deliberately *after* any configured
+`container-copy` entries: a `container-copy ~/.gitconfig:/root/.gitconfig`
+(the git-identity recipe further down) overwrites the container's
+entire `~/.gitconfig` verbatim on every creation, which would silently
+undo this setting if it ran first — see `docs/gimmicks.md`. Editing
+either the command or the tracked ignore file later needs `ruori
+rebuild <branch>` to take effect.
+
+For a container-only change to a file's *content* rather than just
+adding ignore patterns — the container's literal `.gitignore` needing
+to differ, say, or any other tracked file — reach for `container-overlay`
+instead; it patches the tracked file's in-container view directly (see
+above).
+
 ## Host-side tooling and generated directories
 
 The container is Linux; your host is macOS. Anything a toolchain
@@ -314,6 +384,12 @@ directory later (a new workspace package, say) is one more line plus
 `container-volume` deliberately takes exact paths, not patterns: the
 set of directories you're shadowing should be something you can read
 off the config file, not something resolved behind your back.
+
+Not every generated artifact needs its own volume, though: if it's
+small and doesn't need storage isolation, but would otherwise just be
+noise in `git status`/`git add -A` *inside the container*, "Recipe:
+container-only gitignore patterns" above may be enough, with no
+`container-volume` line at all.
 
 ### Recipe: a Node.js monorepo
 
@@ -578,6 +654,19 @@ RUN git config --system user.name "ruori agent" \
  && git config --system user.email "agent@example.invalid"
 ```
 
+If you're also using `container-init` for something that touches git
+config — the "Recipe: container-only gitignore patterns" above is the
+motivating case — remember `container-copy ~/.gitconfig` overwrites
+the container's *entire* `~/.gitconfig` verbatim on every creation.
+`ruori` already runs `container-init` commands after `container-copy`
+entries for exactly this reason, so a `container-init git config
+--global core.excludesFile ...` line always wins regardless of order
+in `.ruori.conf` — but a bare `--system` identity (the Dockerfile
+alternative just above) plus a `container-copy`'d `~/.gitconfig` that
+*also* happens to set `core.excludesFile` would still have the
+`--global` value win, same as it would for identity. See
+`docs/gimmicks.md`.
+
 ## Recipe: a container-only file tweak (e.g. vite's dev-server bind host)
 
 Vite's default dev-server `host` binds to `localhost`, which resolves
@@ -720,6 +809,7 @@ than the developer's own host namespace.
 | `container-host-port` | host → container (reverse of `container-port`) | fresh, every transition to running | a `socat` process inside the container — **never written to any file** |
 | `container-volume` | n/a (storage swap, not a copy) | once, at container **creation** (`ruori rebuild` to apply an added/removed line) | that one subpath backed by a Docker volume on native storage — starts **empty**, never touches the host |
 | `container-overlay` | host → container | once, at container **creation** (a host/patch-file change also needs `ruori rebuild` to reach an existing container — see above) | a read-only bind-mounted file inside the container, patched fresh from the *current* host file at that moment — host file untouched |
+| `container-init` | n/a (arbitrary command) | once, at container **creation**, after `container-copy` (`ruori rebuild` to apply an added/removed/changed line) | whatever the command itself does — `ruori` tracks no specific resulting file |
 
 `container-volume` looks similar to `container-copy` but does the
 opposite kind of thing: `container-copy` puts a host file's *contents*
