@@ -378,6 +378,25 @@ calls.
 render the text with inert escape bytes, so no capability check is
 needed. (`browser_links_for`.)
 
+### Container tmux draws every non-ASCII character as `_`
+
+**Fact.** `docker exec` forwards none of the host's locale, and
+minimal base images (`ubuntu`, `debian`) set no `LANG`, so everything
+exec'd into a container runs under `POSIX`. tmux decides whether an
+attached client can take UTF-8 from that client's locale, finds none,
+and substitutes `_` for every non-ASCII cell — Claude Code's arrows,
+lazygit's box drawing (issue #4). The tmux server, and therefore every
+pane, inherits the same locale from the `docker exec` that started it.
+**Rejected.** Requiring each repo's Dockerfile to set `ENV LANG`
+(every image would hit this, and forgetting it looks like a ruori
+bug); passing `-e LANG` at `docker run` (only takes effect after a
+`ruori rebuild`). **Decision.** Every `docker exec` that starts or
+attaches the session passes `-e LANG=<image's own LANG, else
+C.UTF-8>`, and the attach also passes `tmux -u`. A session started
+before this fix keeps its POSIX panes until it's killed and recreated,
+but `-u` fixes the rendering on the next attach regardless.
+(`container_lang_for`, `activate_worktree`, `open_iterm_window_for`.)
+
 ## Container terminal color coding
 
 ### The palette must avoid tmux's own default status-bar green
