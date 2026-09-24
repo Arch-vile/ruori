@@ -949,6 +949,17 @@ container_color_for() {
   printf '%s' "${CONTAINER_COLOR_PALETTE[$((hash % ${#CONTAINER_COLOR_PALETTE[@]}))]}"
 }
 
+# The LANG to `docker exec -e` into container $1's tmux calls (issue #4):
+# the image's own LANG if it sets one, else C.UTF-8. `docker exec`
+# forwards none of the host's locale and minimal base images (ubuntu,
+# debian) set no LANG at all, so tmux there runs under POSIX and draws
+# every non-ASCII cell as `_`. See docs/gimmicks.md.
+container_lang_for() {
+  local session="$1" lang
+  lang="$(docker exec "$session" printenv LANG 2>/dev/null)" || true
+  printf '%s' "${lang:-C.UTF-8}"
+}
+
 # Host->container port mappings actually allocated for session $1 (see
 # allocate_port_for/ports_cache_file), comma-separated, or "-" if none.
 container_ports_info_for() {
@@ -2795,7 +2806,9 @@ open_iterm_window_for() {
   # session's last pane just exiting on its own) — see the generated
   # script below.
   if [ "$use_container" = "1" ]; then
-    attach_cmd="'$docker_bin' exec -it '$session' tmux attach -t '$session'"
+    # -u: tmux otherwise decides client UTF-8 support from the locale,
+    # which a bare container doesn't have -- see container_lang_for.
+    attach_cmd="'$docker_bin' exec -it -e 'LANG=$(container_lang_for "$session")' '$session' tmux -u attach -t '$session'"
     session_check_cmd="'$docker_bin' exec '$session' tmux has-session -t '$session'"
     window_title="${repo_name}/${branch} (container)"
   else
@@ -2976,8 +2989,11 @@ activate_worktree() {
     if docker exec "$session_name" tmux has-session -t "$session_name" 2>/dev/null; then
       echo "ruori: resuming existing session for ${target_branch}"
     else
-      local container_cmds cmd first_cmd=1
+      local container_cmds cmd first_cmd=1 container_lang
       container_cmds="$(container_commands)"
+      # The tmux server, and so every pane/window in it, inherits this
+      # LANG -- see container_lang_for.
+      container_lang="$(container_lang_for "$session_name")"
       if [ -n "$container_cmds" ]; then
         # `container-command` directives (opt-in, repeatable): the first
         # one starts the session itself, each further one gets its own
@@ -2988,7 +3004,7 @@ activate_worktree() {
         while IFS= read -r cmd; do
           [ -n "$cmd" ] || continue
           if [ "$first_cmd" = "1" ]; then
-            docker exec "$session_name" tmux new-session -d -s "$session_name" -c "$target_path" "$cmd"
+            docker exec -e "LANG=$container_lang" "$session_name" tmux new-session -d -s "$session_name" -c "$target_path" "$cmd"
             first_cmd=0
           else
             docker exec "$session_name" tmux new-window -t "$session_name" -c "$target_path" "$cmd"
@@ -2999,7 +3015,7 @@ activate_worktree() {
         # shell, nothing) is entirely up to the container image's own
         # CMD/entrypoint or tmux default-command. See
         # docs/container-sandbox-plan.md decision on agent-agnosticism.
-        docker exec -d "$session_name" tmux new-session -d -s "$session_name" -c "$target_path"
+        docker exec -d -e "LANG=$container_lang" "$session_name" tmux new-session -d -s "$session_name" -c "$target_path"
       fi
     fi
     # Visual "you're on a container" cue (issue #30): color this

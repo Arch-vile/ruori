@@ -62,6 +62,17 @@ list --porcelain`'s own reads of `.git` internals never appear here,
 only `ruori`'s own reads/writes of files like `.ruori.conf` or the
 `ruori/` state files do.
 
+## Garbled arrows/borders in a container session
+
+If Claude Code, lazygit or other TUIs in a container session show `_`
+or broken glyphs in place of arrows and box-drawing characters, the
+session was probably started before `ruori` began passing a UTF-8
+locale into the container (see "Container tmux draws every non-ASCII
+character as `_`" in `gimmicks.md`). Kill the session once from the
+picker's Enter menu ("kill tmux") and switch back to it; no container
+rebuild is needed. To check: `echo $LANG` in a pane should print
+`C.UTF-8` (or your image's own locale).
+
 ## A `worktree-overlay` didn't get applied
 
 `ruori` prints `ruori: warning: worktree-overlay for <relpath> not
