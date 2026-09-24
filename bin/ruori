@@ -371,7 +371,7 @@ config_directives_prime
 # each new accessor (container_mode_enabled, container_file_path,
 # container_ports, container_copy_entries) matches only its own key(s),
 # so this is the single shared place unrecognized keys get flagged.
-KNOWN_CONFIG_DIRECTIVES="copy host-command container container-file container-port container-copy container-host-port container-volume container-overlay container-command container-init container-env"
+KNOWN_CONFIG_DIRECTIVES="copy host-command container container-file container-port container-copy container-host-port container-volume worktree-overlay container-command container-init container-env"
 
 warn_unknown_directives() {
   local key value known k
@@ -526,20 +526,18 @@ container_copy_entries() {
   done < <(config_directives)
 }
 
-# One "<relpath>\t<patch-file>" line per `container-overlay <relpath>
+# One "<relpath>\t<patch-file>" line per `worktree-overlay <relpath>
 # <patch-file>` directive. <relpath> (relative to the worktree root) is
-# the file to override inside the container only; <patch-file> is a
+# the file to patch in place in each linked worktree; <patch-file> is a
 # unified diff, relative to $main_worktree_path (same resolution
-# convention `copy` patterns use), meant to be authored once via
-# `git diff -- <relpath> > <patch-file>` and tracked in git alongside
-# .ruori.conf/the Dockerfile. See container_overlay_refresh_one for how
-# it's applied. Neither argument gets "~/" expansion (unlike
-# container_copy_entries' host_path) -- both are always repo-relative,
-# never a host-absolute path.
-container_overlay_entries() {
+# convention `copy` patterns use), tracked in git alongside
+# .ruori.conf. See worktree_overlay_apply_one for how it's applied.
+# Neither argument gets "~/" expansion -- both are always
+# repo-relative, never a host-absolute path.
+worktree_overlay_entries() {
   local key value relpath patchfile
   while IFS=$'\t' read -r key value; do
-    [ "$key" = "container-overlay" ] || continue
+    [ "$key" = "worktree-overlay" ] || continue
     [ -n "$value" ] || continue
     read -r relpath patchfile <<<"$value"
     [ -n "$relpath" ] && [ -n "$patchfile" ] || continue
@@ -641,12 +639,10 @@ warn_container_volume_drift() {
   echo "ruori: container-volume targets changed (${missing}${missing:+ }${extra}); run 'ruori rebuild ${branch}' to apply" >&2
 }
 
-# Directory holding every generated container-overlay file, one level
-# under ruori_state_dir -- kept in its own subdirectory so a `rm -rf` of
-# it alone clears every overlay's generated content without touching
-# the rest of ruori's state, and so `ruori resources`/troubleshooting
-# has one place to point at.
-container_overlay_state_dir() {
+# Scratch/.rej directory for worktree-overlay patch runs, under
+# ruori_state_dir -- never inside the worktree, so a failed apply never
+# drops a stray file into `git status`.
+worktree_overlay_state_dir() {
   local state_dir dir
   state_dir="$(ruori_state_dir)" || return 1
   dir="$state_dir/overlays"
@@ -654,21 +650,11 @@ container_overlay_state_dir() {
   printf '%s' "$dir"
 }
 
-# Deterministic per-(session, relpath) path for a container-overlay's
-# generated (patched) content -- same sanitize()-the-relpath convention
-# as container_volume_name_for, so a nested relpath like
-# "config/vite.config.js" becomes one flat, collision-safe filename.
-container_overlay_generated_file_for() {
-  local session="$1" relpath="$2" dir
-  dir="$(container_overlay_state_dir)" || return 1
-  printf '%s/%s__%s' "$dir" "$session" "$(sanitize "$relpath")"
-}
-
-# Append-only log of container-overlay patch-apply failures, same
+# Append-only log of worktree-overlay patch-apply failures, same
 # convention as iterm.log/file-io.log (docs/troubleshooting.md): a
-# transient stderr line in a tmux pane no one's watching is easy to
-# miss, and by the time you notice a container is serving a stale
-# overlay, the in-process reason why is long gone. Never rotated.
+# stderr line scrolls away under the next picker draw, and by the time
+# you notice a worktree file isn't patched, the reason why is long
+# gone. Never rotated.
 overlay_log_file() {
   local state_dir
   state_dir="$(ruori_state_dir)" || return 1
@@ -681,101 +667,69 @@ log_overlay() {
   printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >>"$f" 2>/dev/null || true
 }
 
-# Generates one container-overlay's file: applies <patch-file>
-# (resolved relative to $main_worktree_path) to the CURRENT content of
-# $worktree_path/<relpath> -- whatever the host file looks like right
-# now, not a frozen snapshot from whenever the patch was authored --
-# writing the result to the generated file that container_start_if_needed
-# bind-mounts over <relpath> inside a brand-new container. Only ever
-# runs once per container lifetime, right before that container's
-# `docker run` (at first creation, or at `ruori rebuild`): a
-# container-overlay directive says "give each new container the current
-# host file patched this way," not "keep an already-running container's
-# view live" -- there's no per-activation refresh, so an existing
-# container never needs to re-read this.
-#
-# On failure (the patch doesn't apply against the current host
-# content), the previously-generated file, if any, is left completely
-# untouched, so a `ruori rebuild` that hits a broken patch still gets a
-# working (if possibly stale) overlay instead of none -- and the
-# failure is logged. Returns 1 so callers can decide how loudly to
-# warn. -o/-r point outside the worktree entirely so a failed or fuzzy
-# apply never drops a .rej/.orig file next to the real, tracked host
-# file; -F0 (zero fuzz) is deliberate too -- a fuzzy "successful" apply
-# can silently produce wrong content, which is worse than the
-# documented "keep last-good" fallback.
-container_overlay_refresh_one() {
-  local session="$1" worktree_path="$2" relpath="$3" patch_rel="$4"
-  local host_file="$worktree_path/$relpath"
+# Applies one worktree-overlay's <patch-file> (resolved relative to
+# $main_worktree_path) to $worktree_path/<relpath> in place. Runs on
+# every activation, so it has to be idempotent:
+#   - reverse-applies cleanly -> already patched, leave it alone;
+#   - forward-applies cleanly -> patch it now;
+#   - neither -> the file was edited over the patched lines (or the
+#     patch is stale): leave the file untouched, warn and log.
+# -f stops BSD patch (macOS) from auto-detecting a "reversed" patch and
+# guessing -R on its own, which would make the already-applied check
+# lie; -F0 because a fuzzy "successful" apply can silently produce
+# wrong content. Writes via -o to a scratch file and then `cat >` so
+# the target keeps its inode/permissions and no .orig/.rej lands in the
+# worktree. Works on tracked and untracked files alike -- a patched
+# tracked file simply shows as modified in git, which is the point.
+# See docs/gimmicks.md.
+worktree_overlay_apply_one() {
+  local worktree_path="$1" relpath="$2" patch_rel="$3"
+  local target="$worktree_path/$relpath"
   local patch_file="$main_worktree_path/$patch_rel"
-  local generated_file scratch rejfile
+  local dir scratch rejfile
 
-  generated_file="$(container_overlay_generated_file_for "$session" "$relpath")" || return 1
-  scratch="${generated_file}.staging"
-  rejfile="${generated_file}.rej"
-
-  if [ ! -f "$host_file" ]; then
-    log_overlay "FAIL session=$session relpath=$relpath reason='host file not found: $host_file'"
+  if [ ! -f "$target" ]; then
+    log_overlay "FAIL path=$worktree_path relpath=$relpath reason='file not found: $target'"
     return 1
   fi
   if [ ! -f "$patch_file" ]; then
-    log_overlay "FAIL session=$session relpath=$relpath reason='patch file not found: $patch_file'"
+    log_overlay "FAIL path=$worktree_path relpath=$relpath reason='patch file not found: $patch_file'"
     return 1
   fi
 
-  log_file_read "$host_file"
+  log_file_read "$target"
   log_file_read "$patch_file"
+  if patch -s -f -R -F0 --dry-run -i "$patch_file" "$target" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  dir="$(worktree_overlay_state_dir)" || return 1
+  scratch="$dir/$(sanitize "$worktree_path/$relpath").staging"
+  rejfile="$dir/$(sanitize "$worktree_path/$relpath").rej"
   rm -f "$scratch" "$rejfile"
-  if patch -i "$patch_file" -o "$scratch" -r "$rejfile" -F0 "$host_file" >/dev/null 2>&1; then
-    cat "$scratch" >"$generated_file"
-    log_file_write "$generated_file"
+  if patch -s -f -F0 -i "$patch_file" -o "$scratch" -r "$rejfile" "$target" >/dev/null 2>&1; then
+    cat "$scratch" >"$target"
+    log_file_write "$target"
     rm -f "$scratch" "$rejfile"
     return 0
-  else
-    log_overlay "FAIL session=$session relpath=$relpath patch=$patch_rel reason='patch did not apply cleanly against current host content (see $rejfile)'"
-    rm -f "$scratch"
-    return 1
   fi
+  log_overlay "FAIL path=$worktree_path relpath=$relpath patch=$patch_rel reason='patch neither applied nor already applied against current content (see $rejfile)'"
+  rm -f "$scratch"
+  return 1
 }
 
-# Warns when the `container-overlay` directives in .ruori.conf differ
-# from the overlay mounts container $1 was actually created with --
-# same reasoning and shape as warn_container_volume_drift: Docker can't
-# add or drop a mount on an existing container, so an added/removed
-# directive only takes effect on `ruori rebuild`. Matched by mount
-# *source* prefix (container_overlay_state_dir), not destination alone,
-# so this never confuses an overlay mount with the plain worktree bind
-# mount or the common-git-dir bind mount, both of which are also Type
-# "bind" and can also land under "$path/..." for the main worktree
-# (whose common dir is "$path/.git").
-#
-# On Docker Desktop for Mac, `docker inspect` sometimes reports a bind
-# mount's Source through the VM's raw view, prefixed with "/host_mnt"
-# (e.g. "/host_mnt/Users/..." instead of "/Users/..."), rather than the
-# plain host path ruori itself passed to `-v`. Observed specifically
-# for the overlay mount, which is a subpath of the common-git-dir mount
-# that's *also* separately bind-mounted whole into every container --
-# every worktree of a repo shares one common dir, so with more than one
-# worktree's container running at once (the normal case), a new
-# container's overlay mount can be nested inside a host path another,
-# already-running container has mounted too; a container created with
-# no such overlap in play doesn't show it. Left unstripped, this makes
-# a correctly-mounted overlay look "missing" -- a false positive, not
-# real drift. Stripping a leading "/host_mnt" (a no-op where it's
-# absent) before matching fixes this regardless of the exact trigger.
-# See docs/gimmicks.md.
-warn_container_overlay_drift() {
-  local name="$1" path="$2" branch="$3" overlay_dir want have missing extra
-  overlay_dir="$(container_overlay_state_dir)" || return 0
-  want="$(container_overlay_entries | cut -f1 | sort -u)"
-  have="$(docker inspect -f '{{range .Mounts}}{{if eq .Type "bind"}}{{.Source}}{{"\t"}}{{.Destination}}{{"\n"}}{{end}}{{end}}' "$name" 2>/dev/null \
-    | sed 's|^/host_mnt/|/|' \
-    | awk -F'\t' -v d="$overlay_dir/" 'index($1,d)==1{print $2}' \
-    | sed -n "s|^${path}/||p" | sort -u)"
-  [ "$want" = "$have" ] && return 0
-  missing="$(comm -23 <(printf '%s\n' "$want") <(printf '%s\n' "$have") | sed '/^$/d; s/^/+/' | paste -sd' ' -)"
-  extra="$(comm -13 <(printf '%s\n' "$want") <(printf '%s\n' "$have") | sed '/^$/d; s/^/-/' | paste -sd' ' -)"
-  echo "ruori: container-overlay targets changed (${missing}${missing:+ }${extra}); run 'ruori rebuild ${branch}' to apply" >&2
+# Applies every worktree-overlay directive to worktree $1. Skips the
+# main worktree, same as sync_env_files: the patch files live there and
+# are authored against it. Runs after sync_env_files so a file `copy`
+# just brought in (a .env, say) can be patched in the same activation.
+apply_worktree_overlays() {
+  local target_path="$1" relpath patchrel
+  [ "$target_path" = "$main_worktree_path" ] && return 0
+  while IFS=$'\t' read -r relpath patchrel; do
+    [ -n "$relpath" ] || continue
+    worktree_overlay_apply_one "$target_path" "$relpath" "$patchrel" \
+      || echo "ruori: warning: worktree-overlay for $relpath not applied -- see $(overlay_log_file 2>/dev/null || echo '<log file>')" >&2
+  done < <(worktree_overlay_entries)
 }
 
 # Copy any files matching the configured patterns (see copy_patterns/
@@ -1272,34 +1226,6 @@ container_start_if_needed() {
     native_volume_flags+=(-v "$volname:$path/$relpath")
   done < <(container_native_volumes)
 
-  # One -v flag per `container-overlay` directive, bind-mounting that
-  # one generated (patched) file over the matching path inside the
-  # container only -- the host's real file at that path is never
-  # touched. The generated file must exist on disk before `docker run`,
-  # since Docker creates an empty directory at a bind-mount source path
-  # that doesn't exist yet, which would break a file-to-file mount.
-  #
-  # Deliberately generated ONLY here (at creation/rebuild), never
-  # refreshed for an already-running container: on Docker Desktop for
-  # Mac, a single-file bind mount's size gets cached at mount time, and
-  # a later host-side write that GROWS the file is served truncated back
-  # to that original size (confirmed empirically -- shrinking or
-  # same-size rewrites propagate live and correctly; growth silently
-  # doesn't, no error, no cache invalidation, even from a brand-new
-  # `docker exec`). Writing the file once, before the mount exists, means
-  # the mount's very first observed size already is its final one, so
-  # this bug never triggers. See docs/gimmicks.md.
-  local -a overlay_flags=()
-  local ov_relpath ov_patchrel ov_generated
-  while IFS=$'\t' read -r ov_relpath ov_patchrel; do
-    [ -n "$ov_relpath" ] || continue
-    if container_overlay_refresh_one "$name" "$path" "$ov_relpath" "$ov_patchrel"; then
-      ov_generated="$(container_overlay_generated_file_for "$name" "$ov_relpath")"
-      overlay_flags+=(-v "$ov_generated:$path/$ov_relpath:ro")
-    else
-      echo "ruori: warning: container-overlay for $ov_relpath failed to generate; container will see the unmodified host file at that path instead -- see $(overlay_log_file 2>/dev/null || echo '<log file>')" >&2
-    fi
-  done < <(container_overlay_entries)
 
   # One -e flag per `container-env` directive, each forwarding the
   # CURRENT value of that named variable in ruori's own process
@@ -1339,7 +1265,6 @@ container_start_if_needed() {
     -v "$path:$path" \
     -v "$common_dir:$common_dir" \
     "${native_volume_flags[@]}" \
-    "${overlay_flags[@]}" \
     "${env_flags[@]}" \
     -e "RUORI_SHARED_DIR=$common_dir/ruori/shared" \
     "${port_flags[@]}" \
@@ -1427,13 +1352,13 @@ require_docker_if_container_mode() {
   fi
 }
 
-# `patch` is only needed by repos that actually use `container-overlay`
-# (see container_overlay_refresh_one), so this is a soft dependency like
+# `patch` is only needed by repos that actually use `worktree-overlay`
+# (see worktree_overlay_apply_one), so this is a soft dependency like
 # docker above rather than one of the always-required commands checked
 # at the top of the script.
 require_patch_if_overlay_configured() {
   if ! command -v patch >/dev/null 2>&1; then
-    echo "ruori: required command 'patch' not found in PATH (needed because ${CONFIG_FILENAME} has a 'container-overlay' directive)" >&2
+    echo "ruori: required command 'patch' not found in PATH (needed because ${CONFIG_FILENAME} has a 'worktree-overlay' directive)" >&2
     exit 1
   fi
 }
@@ -2170,7 +2095,7 @@ warn_unknown_directives
 CONTAINER_MODE=0
 container_mode_enabled && CONTAINER_MODE=1
 [ "$CONTAINER_MODE" = "1" ] && require_docker_if_container_mode
-[ "$CONTAINER_MODE" = "1" ] && [ -n "$(container_overlay_entries)" ] && require_patch_if_overlay_configured
+[ -n "$(worktree_overlay_entries)" ] && require_patch_if_overlay_configured
 
 # Primes _container_image_info_cache in this process (not a subshell —
 # same reasoning as git_common_dir_prime/config_directives_prime
@@ -2390,7 +2315,7 @@ case "$cmd" in
     resources_entry "$common_dir/ruori/ports" "Internal to ruori; only matters in container mode. A worktree's host port is only seeded by a hash of it -- ruori then scans forward from that seed for the first port that's actually free, so the final pick depends on ambient state (what else is running) at that moment, not the hash alone. Docker bakes that exact port into the container permanently at creation and won't let it change without recreating the container, so ruori has to remember what it picked here rather than recomputing it later and risking a different answer. Written when a container-mode worktree's container first starts; its entries are dropped when that worktree is removed ('ruori rm')."
     resources_entry "$common_dir/ruori/iterm.log" "Debug-only -- you don't need to read this unless an iTerm2 window is misbehaving (see docs/troubleshooting.md). An append-only log of the manager loop's own iTerm2 window open/close lifecycle. Written continuously by ruori for as long as the manager loop ('ruori' with no args) keeps running."
     resources_entry "$common_dir/ruori/file-io.log" "Debug-only -- for troubleshooting/transparency (see docs/troubleshooting.md). An append-only log of every read/write ruori's own script code performs against a file (state/cache files, $CONFIG_FILENAME, worktree copy-in, generated files) -- not file access done inside a child process it shells out to (git, docker, code, fzf, osascript), which isn't observable here. Written by every ruori command that touches a file, including read-only ones like 'list'."
-    resources_entry "$common_dir/ruori/overlay.log" "Debug-only -- for troubleshooting a container-overlay that looks stale (see docs/troubleshooting.md). An append-only log of every container-overlay patch-apply failure, with the reason and which .rej file (if any) to inspect. Written only when a 'container-overlay' directive's patch fails to apply against the current host file."
+    resources_entry "$common_dir/ruori/overlay.log" "Debug-only -- for troubleshooting a worktree-overlay that didn't get applied (see docs/troubleshooting.md). An append-only log of every worktree-overlay patch that neither applied nor was already applied, with the reason and which .rej file (under $common_dir/ruori/overlays/) to inspect. Written only when that happens."
     resources_entry "$common_dir/ruori/iterm-window" "Internal to ruori. Tracks the single iTerm2 window id the manager loop currently owns, so switching worktrees closes the right window before opening a new one instead of leaking windows behind. Written by ruori every time it opens or closes that window; only meaningful while the manager loop is running."
     resources_entry "$common_dir/ruori/shared" "This is RUORI_SHARED_DIR (see the 'Managed resources' section below) -- only present if container mode is on. ruori itself never writes anything under it; whatever's there was put there by this repo's own Dockerfile/entrypoint (e.g. 'ruori-claude-home', if this repo shares Claude Code's login -- see docs/container-sandbox-guide.md's 'Recipe: Claude Code auth')."
     resources_entry "$common_dir/ruori/readme.md" "Not read back by ruori -- a plain copy of ruori's own README.md, written by 'ruori init' alongside the docs/ copy below for you to hand to a coding agent (any agent; it's just a file, not a Claude Code skill). Safe to delete once an agent has read it; re-run 'ruori init' any time for a fresh copy."
@@ -2408,10 +2333,17 @@ case "$cmd" in
     resources_entry "$main_worktree_path/$dockerfile_rel" "Yours to write, usually with a coding agent's help after 'ruori init' (see $common_dir/ruori/docs/new-repo-setup-guide.md above) -- ruori only reads it, to 'docker build' this repo's shared image. Only matters if $CONFIG_FILENAME has 'container on'; ruori never looks at it otherwise. Read (and rebuilt from) fresh on every container start, so editing it takes effect on your next switch."
     while IFS=$'\t' read -r overlay_relpath overlay_patchrel; do
       [ -n "$overlay_relpath" ] || continue
-      resources_entry "$main_worktree_path/$overlay_patchrel" "Yours to write once -- a unified diff (e.g. 'git diff -- $overlay_relpath > this-file') authored against a scratch copy of '$overlay_relpath', then tracked in git like $CONFIG_FILENAME/the Dockerfile. ruori only reads it, applying it to this worktree's *current* '$overlay_relpath' each time this worktree's container is created or rebuilt (see docs/container-sandbox-guide.md's overlay recipe) -- overrides that path inside that container only; the host file is never touched. Not re-applied to an already-running container; edit the patch or the host file before your next 'ruori rebuild' to change what a fresh container gets."
-    done < <(container_overlay_entries)
+      resources_entry "$main_worktree_path/$overlay_patchrel" "Yours to write once -- a unified diff of '$overlay_relpath' (e.g. 'git diff -- $overlay_relpath > this-file' for a tracked file, 'diff -u <original-copy> $overlay_relpath > this-file' for an untracked one), tracked in git like $CONFIG_FILENAME. ruori only reads it, per a 'worktree-overlay' directive (see docs/config-file.md)."
+    done < <(worktree_overlay_entries)
     resources_scope "Worktree"
-    resources_none
+    if [ -n "$(worktree_overlay_entries)" ] && [ "$worktree_path" != "$main_worktree_path" ]; then
+      while IFS=$'\t' read -r overlay_relpath overlay_patchrel; do
+        [ -n "$overlay_relpath" ] || continue
+        resources_entry "$worktree_path/$overlay_relpath" "Your worktree's own file, but modified by ruori: patched in place with $overlay_patchrel on every switch to this worktree unless the patch is already applied (so it's a no-op after the first time). If you edit the patched lines so the patch neither applies nor is already applied, ruori leaves the file alone and warns. A tracked file patched this way shows as modified in 'git status' -- don't commit that change unless you mean to. Never done for the main worktree."
+      done < <(worktree_overlay_entries)
+    else
+      resources_none
+    fi
 
     resources_section "Managed resources"
     resources_scope "Global"
@@ -2438,10 +2370,6 @@ case "$cmd" in
       if [ -n "$(container_host_ports)" ]; then
         resources_entry "socat process(es) inside $worktree_session" "Not a file -- one background 'socat' process per configured container-host-port, running inside this worktree's container, relaying localhost:<port> there to host.docker.internal:<port> on the host (see the 'container-host-port' directive in $CONFIG_FILENAME and docs/container-sandbox-guide.md). Started by ruori via 'docker exec -d' every time the container transitions to running -- 'docker stop' kills these along with everything else in the container, so they're never persisted or tracked in a file."
       fi
-      while IFS=$'\t' read -r overlay_relpath overlay_patchrel; do
-        [ -n "$overlay_relpath" ] || continue
-        resources_entry "$(container_overlay_generated_file_for "$worktree_session" "$overlay_relpath")" "Not something you edit -- generated by ruori (the patch above applied to this worktree's '$overlay_relpath', as it looked at that moment) the first time this worktree's container starts, or again on 'ruori rebuild', and bind-mounted read-only over '$overlay_relpath' inside that container, so only the container sees this content; the host's real '$overlay_relpath' is untouched. Not regenerated for an already-running container -- see the patch file above. Safe to delete; ruori recreates it the next time this worktree's container is created or rebuilt."
-      done < <(container_overlay_entries)
       if [ -n "$(container_init_commands)" ]; then
         resources_entry "container-init commands (see $CONFIG_FILENAME)" "Not a specific file -- one or more one-time setup commands run via 'docker exec' inside this worktree's container the first time it's created (same one-time-at-creation rule as container-copy above, run immediately after it). Whatever they create or configure inside the container is between you and those commands; edit them in $CONFIG_FILENAME, then 'ruori rebuild $worktree_branch' to re-run against a fresh container."
       fi
@@ -3029,11 +2957,11 @@ activate_worktree() {
   local target_path="$1" session_name="$2" target_branch="$3"
 
   sync_env_files "$target_path"
+  apply_worktree_overlays "$target_path"
 
   if [ "$CONTAINER_MODE" = "1" ]; then
     container_start_if_needed "$session_name" "$target_path"
     warn_container_volume_drift "$session_name" "$target_path" "$target_branch"
-    warn_container_overlay_drift "$session_name" "$target_path" "$target_branch"
     if docker exec "$session_name" tmux has-session -t "$session_name" 2>/dev/null; then
       echo "ruori: resuming existing session for ${target_branch}"
     else

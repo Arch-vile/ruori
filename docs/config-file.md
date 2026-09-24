@@ -31,7 +31,8 @@ rather than breaking the file. This shape is deliberate: the same file
 will grow more kinds of setting later (editor override, port range
 base — see TODO.md) without needing a new format.
 
-Two directives apply outside container mode: `copy` and `host-command`.
+Three directives apply outside container mode (and in it too): `copy`,
+`worktree-overlay`, and `host-command`.
 
 `copy` is for gitignored files that get copied into a new worktree if it's missing them:
 the value is a glob pattern relative to the repo root. A plain filename
@@ -55,6 +56,46 @@ directly) can generate this file for a given repo: inspect that repo's
 `.gitignore`/config and write a sensible `.ruori.conf` from the format
 above.
 
+`worktree-overlay <relpath> <patch-file>` patches a file in each
+linked worktree in place. `<relpath>` is the file, relative to the
+worktree root; `<patch-file>` is a unified diff, relative to the main
+worktree root, tracked in git next to `.ruori.conf`. On every switch
+(after `copy`, so a just-copied `.env` can be patched in the same
+switch) `ruori` checks the file:
+
+- patch already applied → nothing to do;
+- patch applies cleanly → applied in place;
+- neither (you've edited the patched lines, or the patch is stale) →
+  the file is left alone, and `ruori` prints a warning and logs the
+  reason to `<git-common-dir>/ruori/overlay.log` (see
+  [troubleshooting.md](troubleshooting.md)).
+
+It works on tracked and untracked files alike, in host and container
+mode — it's the worktree's own file, not a container-only view. A
+patched *tracked* file shows as modified in `git status` everywhere;
+that's expected, just don't commit it unless you mean to. The main
+worktree is never patched (the patch is authored against it). Applying
+uses zero fuzz, so a patch never lands somewhere approximate. Requires
+`patch` on `PATH`.
+
+```
+# .ruori.conf — every worktree's .env points at the container DB
+copy .env
+worktree-overlay .env .ruori/overlays/env-db-host.patch
+```
+
+To author a patch, edit the file in the main worktree the way
+worktrees should have it, capture the diff, then revert:
+
+```sh
+mkdir -p .ruori/overlays
+# tracked file:
+git diff -- vite.config.ts > .ruori/overlays/vite-host.patch
+git checkout -- vite.config.ts
+# untracked file: diff against a copy you kept before editing
+diff -u /tmp/env.orig .env > .ruori/overlays/env-db-host.patch
+```
+
 `host-command <cmd>` sets what a brand-new host-mode tmux session runs
 on creation. With no `host-command` line, a new session is just a
 plain shell — `ruori` doesn't assume every user wants an AI agent
@@ -65,10 +106,10 @@ auto-started:
 host-command claude --resume
 ```
 
-Ten more directives opt a repo into **container mode**: `container`,
+Nine more directives opt a repo into **container mode**: `container`,
 `container-file`, `container-port`, `container-copy`,
-`container-host-port`, `container-volume`, `container-overlay`,
-`container-command`, `container-init`, `container-env`. See the
+`container-host-port`, `container-volume`, `container-command`,
+`container-init`, `container-env`. See the
 [container sandbox guide](container-sandbox-guide.md) for what they do
 and a worked example — a repo with none of them behaves exactly as
 described above.

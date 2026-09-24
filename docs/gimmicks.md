@@ -85,97 +85,53 @@ exactly those same paths. **Decision.** `docker run -v "$path:$path"
 -v "$common_dir:$common_dir"`; git is a hard Dockerfile requirement.
 (`container_start_if_needed`; plan section D.)
 
-### A single-file bind mount's size gets stuck on Docker Desktop for Mac
+### Per-worktree file tweaks patch the worktree in place, never a bind mount over one file
 
-**Fact.** `container-overlay` needed a way to make one already-tracked
-file (`vite.config.js`, say) look different inside a container without
-touching the host's copy. The natural approach — write the patched
-content to a generated file, bind-mount it over the target path, and
-just rewrite that generated file in place whenever the host file
-changes, so an already-running container picks it up live — was
-implemented and then broken by a real, reproducible platform bug:
-verified empirically (mounttest repro, unrelated to any `ruori` code)
-that on Docker Desktop for Mac, a container's view of an individually
-file-bind-mounted path caches that file's byte length at whatever it
-last was when the container observed it. Overwriting the host side with
-**shorter or equal-length** content is picked up instantly, even from a
-brand-new `docker exec`. Overwriting with **longer** content is served
-silently truncated back to the old length — indefinitely, not just
-delayed; waiting doesn't fix it. A file reachable only through the
-*existing directory* bind mount (the worktree/common-dir mounts every
-container already has) never has this problem at any size — it's
-specific to a second, individual file mount layered on top.
-
-**Rejected.**
-- *Rewrite the generated file in place on every switch* (the original
-  design). Silently truncates the container's view on any edit that
-  makes the rendered content longer than it was at mount time — for a
-  patched config file, an edit growing it is the common case, not an
-  edge case. This is worse than doing nothing: no error, no log line,
-  just wrong content.
-- *Pad the generated file to a large fixed size up front, rewrite
-  content-plus-padding on refresh so the mount never observes a size
-  change.* Works (shrinking/same-size is always safe, confirmed by the
-  same repro), but only until real content exceeds the pad, at which
-  point it's the exact same silent-truncation failure one layer up, and
-  it's a genuinely surprising thing for a reader to find in the code
-  with no visible reason.
-- *`docker restart` on any length change to force Docker to
-  re-establish the mount.* Confirmed unnecessary once the actual
-  requirement was clarified (below) — and would have killed the tmux
-  session and everything running in it, the exact disruption `ruori`
-  exists to avoid.
-
-**Decision.** The actual requirement turned out to be narrower than
-"stay live-synced": a `container-overlay` patch only needs to reflect
-the *current* host file for a **new** container, not keep an
-already-running one in sync. So the generated file is written exactly
-once per container lifetime, in `container_start_if_needed`'s creation
-branch, **before** that container's `docker run` — the bind mount's
-very first observed size is already its final one, so the growth-cache
-bug has nothing to trigger on. Nothing refreshes it afterward; a
-host/patch-file change reaches a container only via `ruori rebuild`,
-same "delete to refresh" model `container-copy` already uses. See
-`container_overlay_refresh_one`, `container_start_if_needed`'s overlay
-block, and the guide's "`container-overlay` applies a patch at
-container creation, not a live link".
-
-### `docker inspect` can report a bind mount's Source through `/host_mnt` instead of the plain host path
-
-**Fact.** `warn_container_overlay_drift` tells a `container-overlay`
-mount apart from every other bind mount on the container by matching
-`docker inspect`'s reported `Source` against
-`container_overlay_state_dir()`'s plain host path as a string prefix.
-Verified against a real repo: for a container created while another,
-already-running container (a sibling worktree of the same repo — the
-normal case, since every worktree shares one common git dir, itself
-also bind-mounted whole into every container) already held that same
-host path mounted, Docker Desktop for Mac reported the *nested*
-overlay mount's `Source` prefixed with `/host_mnt/` (e.g.
-`/host_mnt/Users/...` instead of `/Users/...`) — the raw path from
-inside its Linux VM, not the host alias `ruori` itself passed to `-v`.
-A container created with no such mount overlap in play showed the
-plain path instead, for the exact same directive, same code path, same
-Docker Desktop instance. Left unhandled, the prefix mismatch makes a
-correctly-mounted overlay look "missing" — a false "container-overlay
-targets changed" warning right after the container it's warning about
-was just freshly created with that mount included.
+**Fact.** Making one file differ per worktree/container (a `.env`'s DB
+host, a `vite.config.*` bind host) was first built as
+`container-overlay`: generate a patched copy under `<git-common-dir>/ruori/`
+and bind-mount it read-only over the path inside the container, host
+file untouched. Every part of that fought back:
+- On Docker Desktop for Mac an individually file-bind-mounted path
+  caches its byte length at mount time: host-side rewrites that
+  *grow* the file are served silently truncated, indefinitely (shorter
+  or equal-length rewrites propagate fine; files reached through the
+  directory bind mounts never have the problem). So the overlay could
+  only be generated once, before `docker run`, and never refreshed.
+- `docker inspect` sometimes reported that mount's `Source` through the
+  VM's `/host_mnt/...` view, so the drift check needed a prefix strip
+  to stop false "targets changed" warnings.
+- For a git-tracked target — the flagship use case — git inside the
+  container shares the worktree's index with the host but read the
+  patched content, so it always showed the file as modified (easy to
+  commit by accident), and couldn't rewrite a mount point at all:
+  checkout/stash/reset/rebase failed with `EBUSY` ("unable to unlink
+  old '<file>': Device or resource busy"), once mid-rebase, leaving
+  `rebase-merge/` holding only the autostash commit.
 
 **Rejected.**
-- *Move the generated overlay file out from under the common-git-dir
-  mount, so no nested mount ever exists to trigger this.* Might avoid
-  this specific trigger, but the theory of *why* Docker Desktop does
-  this isn't fully pinned down (two data points, not a confirmed
-  mechanism) — relocating only pays off if that guess is complete and
-  exhaustive. It would also fight the "every per-repo state file lives
-  under `<git-common-dir>/ruori/`" decision elsewhere in this file,
-  losing the one-`rm -rf`-clears-everything property for no proven
-  gain.
+- *Keep the mount, refuse tracked targets* (briefly shipped, as a hard
+  error). Removes the git breakage but leaves the size-cache and
+  `/host_mnt` workarounds, and the flagship case unsupported.
+- *`git update-index --skip-worktree`/`--assume-unchanged`, or a
+  separate `GIT_INDEX_FILE` in the container.* The index lives in the
+  common git dir shared with the host, so the first hides real host
+  edits; the second means two diverging indexes and still `EBUSY`.
+- *Padding the generated file, or `docker restart` on growth* to dodge
+  the size cache. Padding only moves the truncation cliff; a restart
+  kills the tmux session `ruori` exists to preserve.
 
-**Decision.** Strip a leading `/host_mnt/` from every reported bind
-`Source` before matching — a no-op where the prefix is absent, correct
-whether or not the nested-mount theory above is the complete
-explanation. (`warn_container_overlay_drift`.)
+**Decision.** `worktree-overlay <relpath> <patch-file>`: patch the
+worktree's own file in place, on every switch, in both modes, no
+mount. Idempotent via a reverse `--dry-run` (already applied → no-op),
+else a forward apply, else leave the file alone and warn/log. A patched
+tracked file just shows as modified — that's accepted, and git works
+normally everywhere. Two `patch` details: `-f`, because BSD patch
+(macOS) otherwise auto-detects a "reversed" patch and silently applies
+`-R` itself, making the already-applied check always succeed; and
+`-F0` plus `-o <scratch>` then `cat >`, so there's no fuzzy
+"success", no `.orig`/`.rej` in the worktree, and the target keeps its
+inode. (`worktree_overlay_apply_one`, `apply_worktree_overlays`.)
 
 ### `docker cp` neither creates parent directories nor copies a directory the way `cp` does
 
