@@ -26,8 +26,10 @@ lines, `ruori` copies nothing: env-file copying is opt-in, not a
 hardcoded default.
 
 Each line is `<directive> <value>`. Blank lines and lines starting with
-`#` are ignored; an unrecognized directive is warned about and skipped
-rather than breaking the file. This shape is deliberate: the same file
+`#` are ignored. An unrecognized directive (e.g. a typo like
+`contianer on`) is a fatal error: `ruori` lists every unknown key and
+exits before doing anything else, rather than silently ignoring a
+setting you meant to apply. This shape is deliberate: the same file
 will grow more kinds of setting later (editor override, port range
 base — see TODO.md) without needing a new format.
 

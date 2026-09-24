@@ -316,8 +316,8 @@ fi
 # main worktree's root. Each non-blank, non-comment (#) line is
 # "<directive> <value>" — e.g. "copy .env.*" — so the file can grow more
 # kinds of setting later (editor override, port base, ...) without
-# changing its shape; unrecognized directives are warned about and
-# skipped rather than breaking parsing.
+# changing its shape; an unrecognized directive is a fatal error at
+# startup (validate_config_directives) rather than silently skipped.
 CONFIG_FILENAME=".ruori.conf"
 
 # Emits "<directive>\t<value>" for each config line, trimmed and with
@@ -366,23 +366,35 @@ config_directives_prime() {
 config_directives_prime
 
 # All directive keys any accessor below understands. Checked once here
-# (warn_unknown_directives) rather than in copy_patterns itself, since
+# (validate_config_directives) rather than in copy_patterns itself, since
 # copy_patterns is no longer the only consumer of config_directives —
 # each new accessor (container_mode_enabled, container_file_path,
 # container_ports, container_copy_entries) matches only its own key(s),
-# so this is the single shared place unrecognized keys get flagged.
+# so this is the single shared place unrecognized keys are rejected.
 KNOWN_CONFIG_DIRECTIVES="copy host-command container container-file container-port container-copy container-host-port container-volume worktree-overlay container-command container-init container-env"
 
-warn_unknown_directives() {
-  local key value known k
+validate_config_directives() {
+  local key value known k unknown=()
   while IFS=$'\t' read -r key value; do
     known=0
     for k in $KNOWN_CONFIG_DIRECTIVES; do
       [ "$key" = "$k" ] && { known=1; break; }
     done
-    [ "$known" = "1" ] || echo "ruori: ${CONFIG_FILENAME}: unknown directive '$key' (ignored)" >&2
+    [ "$known" = "1" ] || unknown+=("$key")
   done < <(config_directives)
+  [ "${#unknown[@]}" -eq 0 ] && return 0
+  for key in "${unknown[@]}"; do
+    echo "ruori: ${CONFIG_FILENAME}: unknown directive '$key'" >&2
+  done
+  echo "ruori: fix or remove the directive(s) above in $main_worktree_path/$CONFIG_FILENAME (known: $KNOWN_CONFIG_DIRECTIVES)" >&2
+  exit 1
 }
+# Run immediately, before any command (including the hidden fzf
+# subprocess ones) gets a chance to act: a typo'd directive silently
+# doing nothing (e.g. "contianer on" leaving a repo in host mode) is
+# worse than refusing to start, so an unknown key is fatal rather than
+# a warning that scrolls past.
+validate_config_directives
 
 # The "copy" directive's values: glob patterns (relative to the main
 # worktree root) of files to copy into a worktree missing them. Plain
@@ -2091,7 +2103,6 @@ create_worktree_for_branch() {
 # below (main loop, iTerm2 attach, ruori rm, the picker's TMUX column) for
 # the whole run. A repo with no `container on` directive gets
 # CONTAINER_MODE=0 and is byte-identical to today (see decision I).
-warn_unknown_directives
 CONTAINER_MODE=0
 container_mode_enabled && CONTAINER_MODE=1
 [ "$CONTAINER_MODE" = "1" ] && require_docker_if_container_mode
