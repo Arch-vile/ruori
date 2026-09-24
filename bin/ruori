@@ -2100,6 +2100,26 @@ create_worktree_for_branch() {
       return 1
     fi
   else
+    # A name that exists only as a remote-tracking branch (origin/foo, no
+    # local foo) would otherwise become a brand-new local branch off HEAD
+    # that merely shares the remote's name — silently shadowing the work
+    # already on the remote. With exactly one matching remote, branch from
+    # it instead; `-b` off a remote-tracking ref already sets upstream
+    # (git's default branch.autoSetupMerge). Two or more matching remotes
+    # is ambiguous, so that case keeps the old HEAD default.
+    if [ -z "$start_point" ]; then
+      local remote remote_matches=()
+      while IFS= read -r remote; do
+        [ -n "$remote" ] || continue
+        if git -C "$repo_root" show-ref --verify --quiet "refs/remotes/$remote/$branch_arg"; then
+          remote_matches+=("$remote/$branch_arg")
+        fi
+      done < <(git -C "$repo_root" remote)
+      if [ "${#remote_matches[@]}" -eq 1 ]; then
+        start_point="${remote_matches[0]}"
+        echo "ruori: branch '$branch_arg' exists only on a remote; creating it to track '$start_point'"
+      fi
+    fi
     if ! git -C "$repo_root" worktree add -b "$branch_arg" "$new_path" "${start_point:-HEAD}"; then
       return 1
     fi
@@ -2107,6 +2127,51 @@ create_worktree_for_branch() {
 
   echo "ruori: created worktree for '$branch_arg' at $new_path"
   created_worktree_path="$new_path"
+}
+
+# Returns 0 if $1 exists as a local branch or as a remote-tracking branch
+# on any remote. Used by Ctrl-N's "new branch" mode to refuse names that
+# would otherwise quietly check out (or track) an existing branch.
+branch_exists_anywhere() {
+  local name="$1" remote
+  git -C "$repo_root" show-ref --verify --quiet "refs/heads/$name" && return 0
+  while IFS= read -r remote; do
+    [ -n "$remote" ] || continue
+    git -C "$repo_root" show-ref --verify --quiet "refs/remotes/$remote/$name" && return 0
+  done < <(git -C "$repo_root" remote)
+  return 1
+}
+
+# Lists branches that don't have a worktree yet, for Ctrl-N's "existing
+# branch" picker: local branches first, then remote-only ones (from the
+# last fetch — no `git fetch` here), each newest-commit first. One line
+# per candidate: "<display>\t<branch>\t<start-point>", where start-point
+# is empty for a local branch and "<remote>/<branch>" for a remote one
+# (create_worktree_for_branch then branches from it with tracking).
+# Remotes are walked one by one rather than stripping the first path
+# component off refs/remotes/*, since a remote name may itself contain '/'.
+branches_without_worktree() {
+  local -A taken=() local_names=()
+  local b ref remote name
+  for b in "${branches[@]}"; do
+    taken["$b"]=1
+  done
+  while IFS= read -r b; do
+    [ -n "$b" ] || continue
+    local_names["$b"]=1
+    [ -n "${taken[$b]:-}" ] && continue
+    printf '%s\t%s\t\n' "$b" "$b"
+  done < <(git -C "$repo_root" for-each-ref --sort=-committerdate --format='%(refname:short)' refs/heads)
+  while IFS= read -r remote; do
+    [ -n "$remote" ] || continue
+    while IFS= read -r ref; do
+      name="${ref#refs/remotes/$remote/}"
+      [ "$name" = "HEAD" ] && continue
+      [ -n "${local_names[$name]:-}" ] && continue
+      [ -n "${taken[$name]:-}" ] && continue
+      printf '%s\t%s\t%s\n' "$remote/$name  (remote)" "$name" "$remote/$name"
+    done < <(git -C "$repo_root" for-each-ref --sort=-committerdate --format='%(refname)' "refs/remotes/$remote")
+  done < <(git -C "$repo_root" remote)
 }
 
 # Computed once, not per-picker-iteration: container mode is opt-in per
@@ -2589,13 +2654,45 @@ case "$cmd" in
     # the list; the reload surfaces the new row, and picking it with Enter
     # (the normal switch path, already running in the parent loop) is what
     # actually opens tmux/VS Code/iTerm2 for it.
-    read -r -p "New branch name: " branch_name
-    if [ -z "$branch_name" ]; then
-      echo "ruori: aborted, no branch name given"
-    else
-      created_worktree_path=""
-      create_worktree_for_branch "$branch_name" ""
-    fi
+    #
+    # Asks up front whether this is a brand-new branch or an existing one
+    # (issue #48), so a typed name that happens to match an existing
+    # branch never silently checks that branch out: "new branch" refuses
+    # such names, and "existing branch" picks from a list instead of
+    # relying on the user to type an exact name. `|| true` on each fzf:
+    # Esc exits non-zero, which under `set -e` would otherwise surface as
+    # an error instead of a quiet abort back to the picker.
+    new_mode="$(printf '%s\n' "new branch" "existing branch" \
+      | fzf --prompt="new worktree > " --header="esc: back to worktree list" --layout=reverse)" || true
+    case "$new_mode" in
+      "new branch")
+        read -r -p "New branch name: " branch_name
+        if [ -z "$branch_name" ]; then
+          echo "ruori: aborted, no branch name given"
+        elif branch_exists_anywhere "$branch_name"; then
+          echo "ruori: branch '$branch_name' already exists -- use 'existing branch' instead" >&2
+          read -r -p "Press enter to continue" _ || true
+        else
+          created_worktree_path=""
+          create_worktree_for_branch "$branch_name" ""
+        fi
+        ;;
+      "existing branch")
+        candidates="$(branches_without_worktree)"
+        if [ -z "$candidates" ]; then
+          echo "ruori: no branches without a worktree"
+          read -r -p "Press enter to continue" _ || true
+        else
+          picked="$(printf '%s\n' "$candidates" \
+            | fzf --delimiter='\t' --with-nth=1 --prompt="branch > " \
+              --header="esc: back to worktree list" --layout=reverse)" || true
+          if [ -n "$picked" ]; then
+            created_worktree_path=""
+            create_worktree_for_branch "$(printf '%s' "$picked" | cut -f2)" "$(printf '%s' "$picked" | cut -f3)"
+          fi
+        fi
+        ;;
+    esac
     exit 0
     ;;
   *)

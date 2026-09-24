@@ -97,9 +97,22 @@ Keybindings:
   to that row afterwards starts a fresh session for it), and **back**.
   Esc/Ctrl-C on the menu does the same as picking "back" — both return to the
   worktree picker rather than exiting `ruori`.
-- **Ctrl-N** — create a new worktree (prompts for a branch name, creates
-  it, reloads the list) without activating it — see "Creating a
-  worktree" below for why it stops there
+- **Ctrl-N** — create a new worktree without activating it. First
+  asks **new branch** or **existing branch** (Esc goes back to the
+  list):
+  - *new branch* prompts for a name and refuses one that already
+    exists locally or on any remote, pointing you to *existing branch*
+    instead.
+  - *existing branch* shows an fzf list of branches that don't have a
+    worktree yet: local branches first, then remote-only ones (as of
+    your last `git fetch`, shown as `origin/foo  (remote)`), newest
+    commit first. Picking a remote one creates a local branch that
+    tracks it.
+
+  Either way the list then reloads with the new row. Pick it with Enter
+  to activate it. See [gimmicks.md](gimmicks.md) ("fzf `reload`/`execute`
+  bindings run in a fresh process") for why Ctrl-N doesn't activate it
+  itself
 - **Ctrl-R** — refresh `TMUX`/`CLAUDE` on demand (not automatic — see
   [dashboard-columns.md](dashboard-columns.md) for why)
 - **Ctrl-F** — fetch `PR` status and `USAGE` cost together (both are
@@ -123,6 +136,10 @@ branch you just created afterward.
 
 - If `<branch>` already exists locally, it's checked out as-is (any
   `start-point` argument is ignored, with a warning).
+- If `<branch>` doesn't exist locally but exists on exactly one remote
+  (e.g. only `origin/<branch>`) and no `start-point` is given, a local
+  branch tracking that remote branch is created, instead of an
+  unrelated new branch off `HEAD`.
 - Otherwise a new branch is created from `start-point` (default: the
   main worktree's current `HEAD`) — equivalent to `git worktree add -b`.
 - The worktree is created as a **sibling** of the main worktree, never
