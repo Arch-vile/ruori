@@ -140,25 +140,11 @@ with none of these behaves exactly as it does today.
   <branch>' to apply` when that's pending — see `docs/commands.md`.
   Existing volumes keep their data across a rebuild; only the new
   subpaths start empty.
-- **`container-overlay <relpath> <patch-file>`** — repeatable, one per
-  tracked file that should look different **inside the container only**
-  (a dev-server bind address in `vite.config.js`, extra container-only
-  `.gitignore` entries). `<relpath>` is the file's path relative to the
-  worktree root; `<patch-file>` is a unified diff, relative to the main
-  worktree root, that `ruori` applies to that file's *current* content —
-  see "`container-overlay` applies a patch at container creation, not a
-  live link" below for exactly when, and the recipe further down for
-  how to author the patch. Unlike `container-copy`, the source here is
-  never a raw file to copy verbatim — it's always a diff applied against
-  whatever the real file looks like right now, so the container gets
-  the current file plus your small, reviewable delta, not a frozen
-  snapshot from whenever the patch was written. The host's real file at
-  `<relpath>` is never touched; only the container's view of that one
-  path differs. Same rebuild rule as `container-volume`: Docker can't
-  add or remove a mount on an existing container, so `ruori` checks on
-  every switch and prints `container-overlay targets changed (+…); run
-  'ruori rebuild <branch>' to apply` when a directive was added or
-  removed since that container was created.
+- A file that should differ in every worktree (and so in its container)
+  — a `.env` pointing at the container's database host, say — isn't a
+  container directive: use `worktree-overlay`, which patches the
+  worktree's own file in place in both modes. See
+  [config-file.md](config-file.md).
 
 - **`container-command <cmd>`** — repeatable, one per command to run
   automatically in a freshly created session, each in its own tmux
@@ -274,48 +260,6 @@ forwarded SSH inside the container, that needs a live bind-mount of
 `$SSH_AUTH_SOCK` (so key material never leaves the host), which doesn't
 fit the copy-in model above — it isn't set up by `ruori` today.
 
-## `container-overlay` applies a patch at container creation, not a live link
-
-Easy to confuse with `container-copy` since both put something into a
-container without touching the host — the difference is *what* and
-*when*:
-
-- `container-copy` copies a host **file's raw bytes**, once, at
-  creation, from wherever you point it (often outside the repo
-  entirely — a credential in your home directory).
-- `container-overlay` applies a **patch** to a file that's already
-  *inside* the worktree, and — this is the part worth being precise
-  about — re-applies it fresh against whatever that file currently
-  looks like, but **only at the moment a container is created or
-  rebuilt**. It is not a live link: editing the host file, or editing
-  the patch, has no effect on a container that's already running.
-  `ruori` doesn't re-generate the overlay on every switch the way it
-  copies env files — see the gimmicks entry linked below for why.
-- To pick up a host-file or patch-file change, recreate the container:
-  `ruori rebuild <branch>`. This is the same "delete to refresh" model
-  `container-copy` uses, for the same reason — a predictable
-  all-or-nothing mental model beats a partial-sync guessing game.
-
-The reason to author this as a *patch* rather than just keeping a
-second, fully-independent copy of the file for the container is so a
-**new** container reflects the current host file plus your delta,
-without you having to manually re-merge every time the host file
-changes for unrelated reasons — as long as the patch still applies
-cleanly. If it doesn't (the host file changed in a way that conflicts
-with the patch's context), `ruori` doesn't guess or partially apply it:
-the container gets whatever the *last successfully generated* overlay
-was (stale but valid) if one exists, and `ruori` logs the failure to
-`<state-dir>/overlay.log` and prints a warning — never a half-merged or
-silently-reverted-to-host file. Fix the patch (or the host file) and
-`ruori rebuild` again.
-
-**Why this can't just refresh live like `container-copy`'s directory
-mounts do:** see `docs/gimmicks.md`'s "Host vs. container filesystem"
-section — growing a bind-mounted *individual file*'s content in place,
-on Docker Desktop for Mac, doesn't reliably reach an already-running
-container, which is exactly the failure mode "keep last-good, never
-silently corrupt" is designed to avoid running into.
-
 ## Recipe: container-only gitignore patterns
 
 Container-side tooling sometimes produces artifacts (a stray build
@@ -357,11 +301,12 @@ undo this setting if it ran first — see `docs/gimmicks.md`. Editing
 either the command or the tracked ignore file later needs `ruori
 rebuild <branch>` to take effect.
 
-For a container-only change to a file's *content* rather than just
-adding ignore patterns — the container's literal `.gitignore` needing
-to differ, say, or any other tracked file — reach for `container-overlay`
-instead; it patches the tracked file's in-container view directly (see
-above).
+To make a tracked file's *content* differ, either make the behavior
+configurable (an env var the file reads, set via `container-env` or
+the Dockerfile, or a CLI flag passed via `container-command`) or patch
+it in every worktree with `worktree-overlay` (see
+[config-file.md](config-file.md)) — the latter changes the host's view
+of that worktree too, and shows up in `git status`.
 
 ## Host-side tooling and generated directories
 
@@ -719,46 +664,30 @@ alternative just above) plus a `container-copy`'d `~/.gitconfig` that
 `--global` value win, same as it would for identity. See
 `docs/gimmicks.md`.
 
-## Recipe: a container-only file tweak (e.g. vite's dev-server bind host)
+## Recipe: vite's dev-server bind host
 
 Vite's default dev-server `host` binds to `localhost`, which resolves
 to the *container's* loopback interface, not something reachable from
 the host or another container — inside container mode you generally
-want `0.0.0.0` there, but only inside the container; the host workflow
-should keep binding to `localhost` as usual. This is exactly what
-`container-overlay` is for: a small, container-only tweak to a file
-that's already tracked in the repo.
-
-```sh
-# 1. Edit the file to look exactly how it should inside the container.
-#    (Just edit it directly -- you'll revert this in step 3.)
-$EDITOR vite.config.js   # change server.host to "0.0.0.0"
-
-# 2. Capture the change as a patch, tracked in the repo like the
-#    Dockerfile/.ruori.conf.
-mkdir -p .ruori/overlays
-git diff -- vite.config.js > .ruori/overlays/vite-host.patch
-
-# 3. Put the real, tracked file back -- everyone's checkout (and the
-#    host workflow) keeps the original.
-git checkout -- vite.config.js
-```
-
-Then add to `.ruori.conf`:
+want `0.0.0.0` there. Keep the tracked `vite.config.*` untouched and
+pass the difference in from outside. Either start the dev server with
+the flag directly:
 
 ```
-container-overlay vite.config.js .ruori/overlays/vite-host.patch
+container-command npm run dev -- --host 0.0.0.0
 ```
 
-Commit `.ruori.conf` and the patch file. From here on, every new (or
-rebuilt) container for this repo gets `vite.config.js` patched to bind
-`0.0.0.0`, applied fresh against whatever `vite.config.js` currently
-contains — so an unrelated later edit to `vite.config.js` (a new
-plugin, say) still comes through; only editing the lines the patch
-itself touches can put it out of sync, and `ruori` will tell you plainly
-if that happens (see "`container-overlay` applies a patch at container
-creation, not a live link" above) rather than silently applying it
-wrong.
+or have the config read an env var (`server: { host:
+process.env.VITE_HOST ?? 'localhost' }`) and set `VITE_HOST=0.0.0.0` in
+the Dockerfile (`ENV VITE_HOST=0.0.0.0`) so it only applies inside the
+container. The same pattern — a flag or env var the host leaves unset —
+covers most "this tracked config must differ in the container" needs.
+
+If you'd rather not touch the dev command or the config's source,
+`worktree-overlay` (see [config-file.md](config-file.md)) can patch
+`vite.config.*` in every linked worktree instead — at the cost of the
+host binding `0.0.0.0` in those worktrees too, and the file showing as
+modified in `git status`.
 
 ## Recipe: `git push`/`pull` fails over an SSH remote from inside the container
 
@@ -860,7 +789,6 @@ than the developer's own host namespace.
 | `container-copy` | host → container | once, only at container **creation** | a private, writable copy inside the container's own filesystem |
 | `container-host-port` | host → container (reverse of `container-port`) | fresh, every transition to running | a `socat` process inside the container — **never written to any file** |
 | `container-volume` | n/a (storage swap, not a copy) | once, at container **creation** (`ruori rebuild` to apply an added/removed line) | that one subpath backed by a Docker volume on native storage — starts **empty**, never touches the host |
-| `container-overlay` | host → container | once, at container **creation** (a host/patch-file change also needs `ruori rebuild` to reach an existing container — see above) | a read-only bind-mounted file inside the container, patched fresh from the *current* host file at that moment — host file untouched |
 | `container-init` | n/a (arbitrary command) | once, at container **creation**, after `container-copy` (`ruori rebuild` to apply an added/removed/changed line) | whatever the command itself does — `ruori` tracks no specific resulting file |
 | `container-env` | host → container (env only, from `ruori`'s own process) | once, at container **creation** (`ruori rebuild` to apply a changed/added/removed line) | an env var in the container process — **never written to any file** |
 
