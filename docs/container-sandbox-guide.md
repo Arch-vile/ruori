@@ -63,7 +63,7 @@ matches the color of that worktree's `BRANCH` column in the picker.
 There's nothing to configure, and a host-mode worktree shows no color
 at all.
 
-## The nine directives
+## The ten directives
 
 Add these to `.ruori.conf` at the main worktree's root (same
 file the `copy` directive already lives in — see
@@ -203,6 +203,20 @@ with none of these behaves exactly as it does today.
   (an arbitrary string from a human-authored `.ruori.conf`, run via a
   shell). Editing the command list later needs `ruori rebuild <branch>`
   to take effect, exactly like `container-copy`.
+
+- **`container-env <NAME>`** — repeatable, one per host environment
+  variable to forward into the container. `ruori` looks up `<NAME>` in
+  its *own* process environment — the shell you launched `ruori` from,
+  since `ruori` runs as one long-lived process across an entire picker
+  session rather than re-executing per worktree switch — at
+  container-creation time, and passes it through as `-e
+  <NAME>=<value>`. A name with nothing set in `ruori`'s environment is
+  silently skipped, not forwarded as an empty string, so it can't
+  override an `ENV` default the image's own Dockerfile already sets.
+  Like `container-copy`, only ever applied at creation — Docker has no
+  way to add an env var to an existing container, so `ruori rebuild
+  <branch>` is what picks up a changed value. See "Recipe: git commit
+  identity" below for the motivating use case.
 
 ## Automatic environment: `RUORI_SHARED_DIR`
 
@@ -628,8 +642,9 @@ A worktree's container gets no git identity of its own by default —
 fatal: unable to auto-detect email address (got 'root@<container-id>.(none)')
 ```
 
-This is a plain file (`~/.gitconfig`), no keychain involved, so it
-fits the copy-in model exactly:
+If your host `~/.gitconfig` has a `[user]` section directly in it,
+this is a plain file, no keychain involved, so it fits the copy-in
+model exactly:
 
 ```
 container-copy ~/.gitconfig:/root/.gitconfig
@@ -644,10 +659,47 @@ gitconfig (aliases, `core.*`, etc.) as a one-time snapshot — same
 "edit the host file, then `docker rm -f`/recreate to pick it up"
 caveat as every other `container-copy` (see above).
 
+If your host `~/.gitconfig` instead routes identity through
+`includeIf "gitdir:~/work/"`-style conditional includes (no `[user]`
+section of its own, just per-account files switched by which directory
+a repo lives under), `container-copy` doesn't work: it only copies the
+one top-level file, never whatever it `include`s, and even copying
+those in too wouldn't help, since `~` inside `includeIf
+"gitdir:~/…"` resolves against the *container's* `$HOME` (`/root`),
+not your host user's, so the conditional never matches inside the
+container regardless of what's on disk there. Sidestep `.gitconfig`
+resolution entirely instead: git already reads `GIT_AUTHOR_NAME`,
+`GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, `GIT_COMMITTER_EMAIL` from
+the environment for every commit, no config file involved. Resolve
+those once per repo, on the host, where your conditional includes
+already work — e.g. a wrapper alias:
+
+```sh
+alias ruori='GIT_AUTHOR_NAME="$(git config user.name)" GIT_AUTHOR_EMAIL="$(git config user.email)" GIT_COMMITTER_NAME="$(git config user.name)" GIT_COMMITTER_EMAIL="$(git config user.email)" command ruori'
+```
+
+(run from inside the repo, so `git config` resolves through your
+conditional includes correctly) — then forward them with
+`container-env`:
+
+```
+container-env GIT_AUTHOR_NAME
+container-env GIT_AUTHOR_EMAIL
+container-env GIT_COMMITTER_NAME
+container-env GIT_COMMITTER_EMAIL
+```
+
+Every worktree of one repo already shares a single identity — that's
+what the conditional-include routing is *for* — so this only needs to
+resolve once per `ruori` session, not per worktree. Same "change the
+host value, then `ruori rebuild <branch>`" caveat as every other
+one-time-at-creation directive: `ruori` only reads the environment
+variable at container creation, never again.
+
 If you'd rather commits made inside the container be attributed to
 something other than your personal identity — the same
-dedicated-identity reasoning as the recipes above — skip this and bake
-a fixed identity into the Dockerfile instead:
+dedicated-identity reasoning as the recipes above — skip either of the
+above and bake a fixed identity into the Dockerfile instead:
 
 ```dockerfile
 RUN git config --system user.name "ruori agent" \
@@ -810,6 +862,7 @@ than the developer's own host namespace.
 | `container-volume` | n/a (storage swap, not a copy) | once, at container **creation** (`ruori rebuild` to apply an added/removed line) | that one subpath backed by a Docker volume on native storage — starts **empty**, never touches the host |
 | `container-overlay` | host → container | once, at container **creation** (a host/patch-file change also needs `ruori rebuild` to reach an existing container — see above) | a read-only bind-mounted file inside the container, patched fresh from the *current* host file at that moment — host file untouched |
 | `container-init` | n/a (arbitrary command) | once, at container **creation**, after `container-copy` (`ruori rebuild` to apply an added/removed/changed line) | whatever the command itself does — `ruori` tracks no specific resulting file |
+| `container-env` | host → container (env only, from `ruori`'s own process) | once, at container **creation** (`ruori rebuild` to apply a changed/added/removed line) | an env var in the container process — **never written to any file** |
 
 `container-volume` looks similar to `container-copy` but does the
 opposite kind of thing: `container-copy` puts a host file's *contents*

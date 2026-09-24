@@ -371,7 +371,7 @@ config_directives_prime
 # each new accessor (container_mode_enabled, container_file_path,
 # container_ports, container_copy_entries) matches only its own key(s),
 # so this is the single shared place unrecognized keys get flagged.
-KNOWN_CONFIG_DIRECTIVES="copy host-command container container-file container-port container-copy container-host-port container-volume container-overlay container-command container-init"
+KNOWN_CONFIG_DIRECTIVES="copy host-command container container-file container-port container-copy container-host-port container-volume container-overlay container-command container-init container-env"
 
 warn_unknown_directives() {
   local key value known k
@@ -572,6 +572,24 @@ container_init_commands() {
   local key value
   while IFS=$'\t' read -r key value; do
     [ "$key" = "container-init" ] || continue
+    [ -n "$value" ] || continue
+    printf '%s\n' "$value"
+  done < <(config_directives)
+}
+
+# One "<NAME>" line per `container-env <NAME>` directive, in config
+# order. Each names a host environment variable whose CURRENT value in
+# ruori's own process -- not re-derived, not read from .ruori.conf --
+# gets forwarded into the container as `-e <NAME>=<value>` at creation
+# time (see container_start_if_needed). A name with nothing set in
+# ruori's own environment is silently skipped rather than forwarded as
+# an empty string, so it can't stomp an ENV default the image's own
+# Dockerfile already sets. See docs/container-sandbox-guide.md's
+# "Recipe: git commit identity" for the motivating use case.
+container_env_names() {
+  local key value
+  while IFS=$'\t' read -r key value; do
+    [ "$key" = "container-env" ] || continue
     [ -n "$value" ] || continue
     printf '%s\n' "$value"
   done < <(config_directives)
@@ -1283,6 +1301,26 @@ container_start_if_needed() {
     fi
   done < <(container_overlay_entries)
 
+  # One -e flag per `container-env` directive, each forwarding the
+  # CURRENT value of that named variable in ruori's own process
+  # environment -- not re-derived per worktree, since ruori runs as one
+  # long-lived process across every worktree switch in a session (see
+  # CLAUDE.md); whatever value was in scope when this container was
+  # created is what it gets, for the life of that container object.
+  # Skips a name with nothing set in ruori's environment entirely,
+  # rather than forwarding an empty string, so an unset var doesn't
+  # override an image-baked ENV default. Only ever applied at creation
+  # -- Docker has no way to add an env var to an existing container --
+  # so a changed value only reaches the container via `ruori rebuild`.
+  local -a env_flags=()
+  local env_var_name env_var_value
+  while IFS= read -r env_var_name; do
+    [ -n "$env_var_name" ] || continue
+    env_var_value="${!env_var_name:-}"
+    [ -n "$env_var_value" ] || continue
+    env_flags+=(-e "${env_var_name}=${env_var_value}")
+  done < <(container_env_names)
+
   # RUORI_SHARED_DIR tells the image's own entrypoint/Dockerfile where
   # this repo's shared, writable, cross-worktree storage lives inside
   # the container -- today that's a subdirectory of the common git dir
@@ -1302,6 +1340,7 @@ container_start_if_needed() {
     -v "$common_dir:$common_dir" \
     "${native_volume_flags[@]}" \
     "${overlay_flags[@]}" \
+    "${env_flags[@]}" \
     -e "RUORI_SHARED_DIR=$common_dir/ruori/shared" \
     "${port_flags[@]}" \
     "$(container_image_for)" sleep infinity >/dev/null
@@ -2405,6 +2444,9 @@ case "$cmd" in
       done < <(container_overlay_entries)
       if [ -n "$(container_init_commands)" ]; then
         resources_entry "container-init commands (see $CONFIG_FILENAME)" "Not a specific file -- one or more one-time setup commands run via 'docker exec' inside this worktree's container the first time it's created (same one-time-at-creation rule as container-copy above, run immediately after it). Whatever they create or configure inside the container is between you and those commands; edit them in $CONFIG_FILENAME, then 'ruori rebuild $worktree_branch' to re-run against a fresh container."
+      fi
+      if [ -n "$(container_env_names)" ]; then
+        resources_entry "container-env vars (see $CONFIG_FILENAME)" "Not a file -- one or more host environment variables forwarded into this worktree's container as '-e NAME=value' at docker run time, the moment this worktree's container is first created (same one-time-at-creation rule as container-copy/container-volume above). Each value is whatever ruori's own process saw in its environment at that moment, not re-read from your shell later -- change the value in the shell you launch 'ruori' from, then 'ruori rebuild $worktree_branch' to actually push it into a fresh container. See the 'container-env' directive in $CONFIG_FILENAME."
       fi
     fi
     exit 0
