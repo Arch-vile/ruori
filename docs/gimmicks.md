@@ -93,8 +93,14 @@ mounted in `container_start_if_needed`, covered by
 deliberately skipped by `delete_worktree`. Kept separate from
 `container-volume` rather than a flag on it, because the two differ in
 both path space (container-absolute vs worktree-relative) and lifetime
-(repo vs worktree). The Dockerfile sets `npm_config_store_dir` rather
-than the repo's `.npmrc`, so host installs are unaffected. See
+(repo vs worktree). The Dockerfile sets the store dir via `ENV` rather
+than the repo's `.npmrc`, so host installs are unaffected — and sets
+it under *both* names, `npm_config_store_dir` and
+`pnpm_config_store_dir`: pnpm 10 reads only the former, pnpm 11 only
+the latter, and a wrong one fails silently (pnpm just falls back to an
+in-tree `.pnpm-store` and downloads everything; the shared volume stays
+empty). The first version of the recipe set only `npm_config_store_dir`
+and was verified on pnpm 10, which is how that got missed. See
 `docs/container-sandbox-guide.md` "Recipe: a Node.js monorepo".
 
 ### The host-side install is the user's own concern — ruori tracks nothing about it

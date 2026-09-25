@@ -389,8 +389,15 @@ plus, in the Dockerfile (use whichever user the container runs as):
 
 ```dockerfile
 RUN mkdir -p /pnpm-store && chown node:node /pnpm-store
-ENV npm_config_store_dir=/pnpm-store
+ENV npm_config_store_dir=/pnpm-store \
+    pnpm_config_store_dir=/pnpm-store
 ```
+
+Set both: pnpm ≤10 only reads `npm_config_store_dir`, pnpm 11+ only
+`pnpm_config_store_dir`, and neither complains about the other one
+being set. Check with `pnpm store path` inside the container, from the
+worktree — it must print `/pnpm-store/v<N>`, not a path under the
+worktree or `$PNPM_HOME`.
 
 - With pnpm's default layout, per-package `node_modules` hold only
   symlinks into the root `node_modules/.pnpm`, so the root line does
@@ -411,7 +418,7 @@ ENV npm_config_store_dir=/pnpm-store
   it, but don't run it while another container is installing — at
   worst, a pruned package gets downloaded again later. Two containers
   installing at once is safe (pnpm writes store entries atomically).
-- `npm_config_store_dir` is set in the Dockerfile rather than as
+- The store dir is set in the Dockerfile's `ENV` rather than as
   `store-dir` in the repo's `.npmrc`, so the host's own `pnpm install`
   keeps using the host's global store untouched.
 - pnpm can't hardlink from the store into `node_modules`, since they're

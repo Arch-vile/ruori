@@ -168,8 +168,9 @@ Eight directives go in the same `.ruori.conf` from step 2:
   so a new worktree doesn't re-download every dependency: for pnpm,
   `container-shared-volume /pnpm-store` plus, in the Dockerfile, `RUN
   mkdir -p /pnpm-store && chown <container-user> /pnpm-store` and `ENV
-  npm_config_store_dir=/pnpm-store` (an `ENV`, not `.npmrc`, so the
-  host's own installs are unaffected). Don't list `.pnpm-store` under
+  npm_config_store_dir=/pnpm-store pnpm_config_store_dir=/pnpm-store`
+  (both: pnpm ≤10 reads only the first, pnpm 11+ only the second; an
+  `ENV`, not `.npmrc`, so the host's own installs are unaffected). Don't list `.pnpm-store` under
   `container-volume` — that gives each worktree an empty store of its
   own. Only share content-addressed caches, never `node_modules` or
   build output.
