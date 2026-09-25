@@ -152,7 +152,7 @@ Eight directives go in the same `.ruori.conf` from step 2:
   of sharing the host's directory. The worktree is a live bind mount
   and the container is Linux while the host is macOS, so anything the
   toolchain *generates per platform* must not be shared: native
-  binaries in `node_modules`, compiled build output, a `.pnpm-store`, a
+  binaries in `node_modules`, compiled build output, a
   Rust `target/`, a Python venv. Add one exact line per such directory
   — no globs. Read the repo's `.gitignore` and workspace layout
   (`pnpm-workspace.yaml`, `package.json` `workspaces`, etc.) and list
@@ -162,6 +162,17 @@ Eight directives go in the same `.ruori.conf` from step 2:
   on the host once per worktree for editor support; see "Host-side
   tooling and generated directories" in the container sandbox guide,
   which has a Node.js monorepo recipe.
+- **`container-shared-volume <absolute-container-path>`** — repeatable.
+  One Docker volume per *repo*, mounted at that absolute path in every
+  worktree's container. Use it for a package manager's download store
+  so a new worktree doesn't re-download every dependency: for pnpm,
+  `container-shared-volume /pnpm-store` plus, in the Dockerfile, `RUN
+  mkdir -p /pnpm-store && chown <container-user> /pnpm-store` and `ENV
+  npm_config_store_dir=/pnpm-store` (an `ENV`, not `.npmrc`, so the
+  host's own installs are unaffected). Don't list `.pnpm-store` under
+  `container-volume` — that gives each worktree an empty store of its
+  own. Only share content-addressed caches, never `node_modules` or
+  build output.
 - **`worktree-overlay <relpath> <patch-file>`** — repeatable, and not
   container-specific: patches `<relpath>` in place in every linked
   worktree on each switch (a no-op once applied), e.g. a `copy`'d
@@ -415,9 +426,10 @@ user:
 - The exact `copy` directives you're proposing, one line of reasoning
   each.
 - The exact `container`/`container-file`/`container-port`/
-  `container-copy`/`container-host-port`/`container-volume` directives
-  you're proposing (for `container-volume`, name which generated
-  directories each line covers and why),
+  `container-copy`/`container-host-port`/`container-volume`/
+  `container-shared-volume` directives you're proposing (for
+  `container-volume`, name which generated directories each line
+  covers and why; for `container-shared-volume`, which tool's store),
   and the full contents of the Dockerfile you're proposing to write
   (or, if one already exists at the target path, whether you're
   reusing it as-is or changing it, and why) — including the Claude Code

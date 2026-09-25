@@ -108,10 +108,10 @@ auto-started:
 host-command claude --resume
 ```
 
-Nine more directives opt a repo into **container mode**: `container`,
+Ten more directives opt a repo into **container mode**: `container`,
 `container-file`, `container-port`, `container-copy`,
-`container-host-port`, `container-volume`, `container-command`,
-`container-init`, `container-env`. See the
+`container-host-port`, `container-volume`, `container-shared-volume`,
+`container-command`, `container-init`, `container-env`. See the
 [container sandbox guide](container-sandbox-guide.md) for what they do
 and a worked example — a repo with none of them behaves exactly as
 described above.

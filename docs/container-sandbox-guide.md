@@ -63,7 +63,7 @@ matches the color of that worktree's `BRANCH` column in the picker.
 There's nothing to configure, and a host-mode worktree shows no color
 at all.
 
-## The ten directives
+## The eleven directives
 
 Add these to `.ruori.conf` at the main worktree's root (same
 file the `copy` directive already lives in — see
@@ -140,6 +140,28 @@ with none of these behaves exactly as it does today.
   <branch>' to apply` when that's pending — see `docs/commands.md`.
   Existing volumes keep their data across a rebuild; only the new
   subpaths start empty.
+- **`container-shared-volume <absolute-container-path>`** — repeatable,
+  one per path *inside the container* that should be backed by one
+  Docker volume shared by **every worktree's container of this repo**,
+  rather than one per worktree like `container-volume`. Made for a
+  package manager's download store (pnpm's content-addressed store,
+  a yarn/npm cache): with it, a new worktree's first install copies
+  packages from the shared store instead of downloading all of them
+  again. The path is absolute and must not be inside the worktree —
+  anything under the worktree belongs to one worktree and goes in
+  `container-volume` instead. Docker creates the volume the first time
+  any container mounting it starts, seeding it from the image's
+  contents and ownership at that path, so create the directory in the
+  Dockerfile (owned by the container's user) before pointing a tool at
+  it. Never removed by `ruori rm` — other worktrees still use it; `ruori
+  resources` lists it under Repository, and `docker volume rm` removes
+  it once no container mounts it. Same creation-time rule and drift
+  warning as `container-volume`: an added or removed line needs `ruori
+  rebuild <branch>`. Only share something that's safe to share: a
+  content-addressed cache is (entries are keyed by content and
+  version, so worktrees on different dependency versions just add
+  entries side by side); `node_modules` or build output is not. See
+  "Recipe: a Node.js monorepo" below.
 - A file that should differ in every worktree (and so in its container)
   — a `.env` pointing at the container's database host, say — isn't a
   container directive: use `worktree-overlay`, which patches the
@@ -286,7 +308,7 @@ container-init git config --global core.excludesFile "$PWD/.devcontainer/contain
 ```
 
 `$PWD` resolves to the worktree root because `container-init` commands
-run with that as their working directory (see "The nine directives"
+run with that as their working directory (see "The eleven directives"
 above), so the value git stores is an absolute path — `core.excludesFile`
 resolved relative to the current directory at git's invocation time
 would break if git were ever run from a subdirectory. This only ever
@@ -360,7 +382,14 @@ container-volume node_modules
 container-volume apps/api/node_modules
 container-volume apps/web/node_modules
 container-volume packages/ui/node_modules
-container-volume .pnpm-store
+container-shared-volume /pnpm-store
+```
+
+plus, in the Dockerfile (use whichever user the container runs as):
+
+```dockerfile
+RUN mkdir -p /pnpm-store && chown node:node /pnpm-store
+ENV npm_config_store_dir=/pnpm-store
 ```
 
 - With pnpm's default layout, per-package `node_modules` hold only
@@ -368,28 +397,44 @@ container-volume .pnpm-store
   the heavy lifting — but the per-package lines are still worth having
   (they hold `.bin` shims and any `node-linker=hoisted`/`npm`-style
   real files), and they cost nothing.
-- `pnpm` needs its store on the same filesystem as the volume to
-  hardlink into it, so a `.pnpm-store` inside the worktree must be
-  shadowed too (or moved out of the tree with `store-dir`); otherwise
-  it falls back to copying or fails with `ENOENT … copyfile`. This is
-  also why it only shows up as an in-tree, untracked `.pnpm-store` (and
-  a `git diff`-visible one, if not shadowed) inside the container and
-  not on the host: on the host, the worktree and pnpm's default global
-  store (`~/Library/pnpm/store`, `~/.local/share/pnpm/store`, …) are on
-  the same disk, so pnpm just hardlinks into the global store and never
-  needs a local fallback. Inside the container, the bind-mounted
-  worktree is a different filesystem from the container's own root fs
-  (where that default global-store path resolves to), so pnpm can't
-  hardlink across the boundary and falls back to a store next to
-  `node_modules` instead — inside the worktree, unless shadowed.
+- The store is shared by every worktree's container, so pnpm
+  downloads each package once per repo rather than once per worktree;
+  a new worktree's first `pnpm install` mostly copies from the store.
+  Only the store is shared. Your own source and workspace packages
+  never go into it (workspace deps are symlinks into the worktree's own
+  `packages/*`), and each worktree's `node_modules` and build output
+  stay on its own volumes, so worktrees can't clobber each other.
+- Changing dependency versions in one worktree just adds entries to
+  the store: it's content-addressed, so `foo@1.0.0` and `foo@1.1.0`
+  sit side by side and each worktree's install takes exactly what its
+  own lockfile says. The store only grows; `pnpm store prune` shrinks
+  it, but don't run it while another container is installing — at
+  worst, a pruned package gets downloaded again later. Two containers
+  installing at once is safe (pnpm writes store entries atomically).
+- `npm_config_store_dir` is set in the Dockerfile rather than as
+  `store-dir` in the repo's `.npmrc`, so the host's own `pnpm install`
+  keeps using the host's global store untouched.
+- pnpm can't hardlink from the store into `node_modules`, since they're
+  separate mounts (hardlinks can't cross mounts even on one disk), so
+  it copies instead. That's still a local disk-to-disk copy inside
+  Docker's own VM — far faster than a download. Without a `store-dir`
+  pointing at a mounted store, pnpm falls back to a `.pnpm-store`
+  inside the worktree — on the host bind mount, visible in `git
+  status`, and re-downloaded per worktree.
 - Inside the container, a shadowed directory is a mountpoint, so
   `rm -rf node_modules` fails with `Device or resource busy`. Clear its
   *contents* instead: `find node_modules -mindepth 1 -delete`, then
   reinstall. Cleanup scripts that end with `rm -rf node_modules` need
   the same change.
-- Volumes are per worktree, so each worktree's container installs its
-  own dependencies once; `ruori rebuild` keeps them, `ruori rm` removes
-  them.
+- `container-volume` volumes are per worktree, so each worktree's
+  container still runs its own install once (from the shared store);
+  `ruori rebuild` keeps them, `ruori rm` removes them. The shared store
+  survives `ruori rm`.
+- Migrating from an older `container-volume .pnpm-store` line: replace
+  it with the lines above, then `ruori rebuild <branch>` each existing
+  worktree (the switch-time drift warning will prompt for it). The old
+  per-worktree `…__vol--pnpm-store` volumes can be removed with `docker
+  volume rm`.
 
 ## Recipe: Claude Code auth
 
@@ -789,6 +834,7 @@ than the developer's own host namespace.
 | `container-copy` | host → container | once, only at container **creation** | a private, writable copy inside the container's own filesystem |
 | `container-host-port` | host → container (reverse of `container-port`) | fresh, every transition to running | a `socat` process inside the container — **never written to any file** |
 | `container-volume` | n/a (storage swap, not a copy) | once, at container **creation** (`ruori rebuild` to apply an added/removed line) | that one subpath backed by a Docker volume on native storage — starts **empty**, never touches the host |
+| `container-shared-volume` | n/a (shared storage, not a copy) | once, at container **creation** (`ruori rebuild` to apply an added/removed line) | one Docker volume per **repo**, mounted at the same absolute path in every worktree's container — unlike `RUORI_SHARED_DIR`, which is also shared but lives on the (slower) host bind mount |
 | `container-init` | n/a (arbitrary command) | once, at container **creation**, after `container-copy` (`ruori rebuild` to apply an added/removed/changed line) | whatever the command itself does — `ruori` tracks no specific resulting file |
 | `container-env` | host → container (env only, from `ruori`'s own process) | once, at container **creation** (`ruori rebuild` to apply a changed/added/removed line) | an env var in the container process — **never written to any file** |
 

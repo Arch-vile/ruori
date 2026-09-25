@@ -53,11 +53,49 @@ config to the container's real mounts on every switch, because Docker
 can't change an existing container's mounts — an added/removed line
 needs `ruori rebuild`. Sub-gotchas: a shadowed directory is a
 mountpoint, so `rm -rf node_modules` inside the container fails with
-`Device or resource busy` (empty it with `find … -mindepth 1 -delete`);
-pnpm needs its store on the same filesystem as the volume to hardlink
-into it, so an in-tree `.pnpm-store` must be shadowed too. See
+`Device or resource busy` (empty it with `find … -mindepth 1 -delete`).
+Where pnpm's store goes is its own entry below. See
 `docs/container-sandbox-guide.md` "Host-side tooling and generated
 directories".
+
+### A package store needs one volume per repo, not per worktree
+
+**Fact.** Inside the container, pnpm can't use the image's default
+global store (it's on a different filesystem from `node_modules`), so
+without a `store-dir` it falls back to an in-tree `.pnpm-store` — on
+the host bind mount. The old recipe shadowed that with `container-volume
+.pnpm-store`, which fixed the location but made the store per
+worktree: every new worktree's first install re-downloaded every
+package. Hardlinking from the store into `node_modules` was never on
+the table either way: the two are separate mounts, and Linux refuses
+hardlinks across mounts (EXDEV) even when both volumes live on the same
+disk, so pnpm copies.
+
+**Rejected.**
+- *Store under `RUORI_SHARED_DIR`* (no code change). Shared, but it's
+  on the host bind mount, and copying tens of thousands of small files
+  over Docker Desktop's virtiofs is much slower than volume-to-volume
+  inside the VM.
+- *pnpm's global virtual store.* It would make `node_modules` mostly
+  symlinks into the shared store, but that shares *built* package
+  contents (postinstall output included) across worktrees — exactly
+  the cross-worktree coupling the per-worktree `node_modules` volume
+  exists to avoid.
+- *`pnpm fetch` baked into the image.* The lockfile differs per
+  branch, and any change to it invalidates the layer and re-downloads
+  everything.
+
+**Decision.** A separate `container-shared-volume <absolute-path>`
+directive: one named Docker volume per repo (`container_shared_volume_name_for`,
+prefixed with the repo name and the main worktree's path hash),
+mounted in `container_start_if_needed`, covered by
+`warn_container_volume_drift`, listed by `ruori resources`, and
+deliberately skipped by `delete_worktree`. Kept separate from
+`container-volume` rather than a flag on it, because the two differ in
+both path space (container-absolute vs worktree-relative) and lifetime
+(repo vs worktree). The Dockerfile sets `npm_config_store_dir` rather
+than the repo's `.npmrc`, so host installs are unaffected. See
+`docs/container-sandbox-guide.md` "Recipe: a Node.js monorepo".
 
 ### The host-side install is the user's own concern — ruori tracks nothing about it
 
