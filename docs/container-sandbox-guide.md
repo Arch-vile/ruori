@@ -389,8 +389,8 @@ plus, in the Dockerfile (use whichever user the container runs as):
 
 ```dockerfile
 RUN mkdir -p /pnpm-store && chown node:node /pnpm-store
-ENV npm_config_store_dir=/pnpm-store \
-    pnpm_config_store_dir=/pnpm-store
+ENV npm_config_store_dir=/pnpm-store
+ENV pnpm_config_store_dir=/pnpm-store
 ```
 
 Set both: pnpm ≤10 only reads `npm_config_store_dir`, pnpm 11+ only
