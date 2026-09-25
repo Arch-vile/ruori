@@ -532,6 +532,22 @@ a hash of the worktree path. (`TODO.md` section 1.)
 keeping `feat/x` as a directory would leave an empty `feat/` behind on
 removal and make prompts print "x on feat/x". (`new` command.)
 
+### A branch name that exists only on a remote must not be branched off `HEAD`
+
+**Fact.** `git worktree add -b foo <path> HEAD` with only `origin/foo`
+existing creates an unrelated local `foo`. It looks like the remote
+branch but shadows its work, and nothing warns you. **Rejected.**
+Relying on `git worktree add <path> foo`'s own remote guessing, since
+ruori always passes `-b`. **Decision.** When there's no local branch
+and no explicit start point, and exactly one remote has the name, that
+remote ref becomes the start point. `-b` off a remote-tracking ref
+already sets upstream. With two or more matching remotes the name is
+ambiguous, so ruori falls back to `HEAD`. Ctrl-N additionally asks
+"new branch" vs "existing branch" up front (#48): "new" refuses any
+name that already exists locally or on a remote, and "existing" picks
+from `branches_without_worktree` rather than a typed name.
+(`create_worktree_for_branch`, `__new_prompt`.)
+
 ### Container mode is never inferred from a Dockerfile on disk
 
 **Fact.** A repo can have an unrelated pre-existing
