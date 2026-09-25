@@ -371,7 +371,7 @@ config_directives_prime
 # each new accessor (container_mode_enabled, container_file_path,
 # container_ports, container_copy_entries) matches only its own key(s),
 # so this is the single shared place unrecognized keys are rejected.
-KNOWN_CONFIG_DIRECTIVES="copy host-command container container-file container-port container-copy container-host-port container-volume worktree-overlay container-command container-init container-env"
+KNOWN_CONFIG_DIRECTIVES="copy host-command container container-file container-port container-copy container-host-port container-volume container-shared-volume worktree-overlay container-command container-init container-env"
 
 validate_config_directives() {
   local key value known k unknown=()
@@ -634,17 +634,55 @@ container_volume_name_for() {
   printf '%s__vol-%s' "$session" "$(sanitize "$relpath")"
 }
 
-# Warns when the `container-volume` directives in .ruori.conf differ
-# from the volumes container $1 was actually created with. Docker can't
-# add or drop a mount on an existing container, so a directive added
-# or removed since (e.g. a new workspace package's node_modules) only
-# takes effect on `ruori rebuild`; this is what tells you that's
-# pending. One `docker inspect` per activation, not per picker draw.
+# One "<absolute-container-path>" line per `container-shared-volume
+# <absolute-container-path>` directive, in config order. Unlike
+# container-volume, the path is inside the container (not relative to
+# the worktree) and the volume behind it is one per *repo*, mounted
+# into every worktree's container -- a package manager's
+# content-addressed store (pnpm's, the motivating case) being the kind
+# of thing that's safe to share this way, while node_modules itself is
+# not. See docs/gimmicks.md's "A package store needs one volume per
+# repo, not per worktree".
+container_shared_volumes() {
+  local key value
+  while IFS=$'\t' read -r key value; do
+    [ "$key" = "container-shared-volume" ] || continue
+    [ -n "$value" ] || continue
+    case "$value" in
+      /*) printf '%s\n' "${value%/}" ;;
+      *) echo "ruori: ignoring 'container-shared-volume $value' in $CONFIG_FILENAME: path must be absolute (it's a path inside the container)" >&2 ;;
+    esac
+  done < <(config_directives)
+}
+
+# Name prefix every `container-shared-volume` volume of this repo shares
+# -- per repo rather than per session, with the main worktree's path
+# hash so two repos with the same basename don't end up sharing a
+# store. Also what `ruori resources` lists by, so a volume whose
+# directive has since been removed still shows up there.
+container_shared_volume_prefix() {
+  printf '%s__%s__shared-' "$(sanitize "$repo_name")" "$(path_hash_for "$main_worktree_path")"
+}
+
+container_shared_volume_name_for() {
+  printf '%s%s' "$(container_shared_volume_prefix)" "$(sanitize "${1#/}")"
+}
+
+# Warns when the `container-volume`/`container-shared-volume` directives
+# in .ruori.conf differ from the volumes container $1 was actually
+# created with. Docker can't add or drop a mount on an existing
+# container, so a directive added or removed since (e.g. a new
+# workspace package's node_modules) only takes effect on `ruori
+# rebuild`; this is what tells you that's pending. One `docker inspect`
+# per activation, not per picker draw. Worktree-relative targets are
+# reported relative, shared ones by their absolute container path.
 warn_container_volume_drift() {
-  local name="$1" path="$2" branch="$3" want have missing extra
-  want="$(container_native_volumes | sort -u)"
-  have="$(docker inspect -f '{{range .Mounts}}{{if eq .Type "volume"}}{{.Destination}}{{"\n"}}{{end}}{{end}}' "$name" 2>/dev/null \
-    | sed -n "s|^${path}/||p" | sort)"
+  local name="$1" path="$2" branch="$3" want have missing extra mounts shared_prefix
+  shared_prefix="$(container_shared_volume_prefix)"
+  want="$( { container_native_volumes; container_shared_volumes 2>/dev/null; } | sort -u)"
+  mounts="$(docker inspect -f '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}}{{"\t"}}{{.Destination}}{{"\n"}}{{end}}{{end}}' "$name" 2>/dev/null)"
+  have="$( { printf '%s\n' "$mounts" | cut -f2 | sed -n "s|^${path}/||p"
+             printf '%s\n' "$mounts" | awk -F'\t' -v p="$shared_prefix" 'index($1, p) == 1 { print $2 }'; } | sort)"
   [ "$want" = "$have" ] && return 0
   missing="$(comm -23 <(printf '%s\n' "$want") <(printf '%s\n' "$have") | sed '/^$/d; s/^/+/' | paste -sd' ' -)"
   extra="$(comm -13 <(printf '%s\n' "$want") <(printf '%s\n' "$have") | sed '/^$/d; s/^/-/' | paste -sd' ' -)"
@@ -1248,6 +1286,16 @@ container_start_if_needed() {
     volname="$(container_volume_name_for "$name" "$relpath")"
     native_volume_flags+=(-v "$volname:$path/$relpath")
   done < <(container_native_volumes)
+
+  # One -v flag per `container-shared-volume` directive: the same named
+  # volume for every worktree's container of this repo (see
+  # container_shared_volume_name_for), created by Docker on first use
+  # and seeded from the image's contents/ownership at that path.
+  local shared_path
+  while IFS= read -r shared_path; do
+    [ -n "$shared_path" ] || continue
+    native_volume_flags+=(-v "$(container_shared_volume_name_for "$shared_path"):$shared_path")
+  done < <(container_shared_volumes)
 
 
   # One -e flag per `container-env` directive, each forwarding the
@@ -1998,7 +2046,9 @@ delete_worktree() {
     # directives -- a volume created under a directive since edited or
     # removed from .ruori.conf still gets cleaned up here, same as
     # `docker rm -f` above doesn't care whether "container on" is still
-    # set.
+    # set. `container-shared-volume` volumes are deliberately not matched
+    # by this prefix -- they belong to the repo, not this worktree, and
+    # every other worktree's container still mounts them.
     local vol
     while IFS= read -r vol; do
       [ -n "$vol" ] || continue
@@ -2439,6 +2489,13 @@ case "$cmd" in
     if container_mode_enabled; then
       resources_entry "$(container_image_for)" "Not something you manage day to day. One Docker image shared by every worktree of this repo, built by ruori from the Dockerfile above the first time it's needed, and rebuilt (Docker's own layer cache keeps repeat builds fast) the next time you switch to any worktree after you change that Dockerfile."
       resources_entry "RUORI_SHARED_DIR (env var, inside any container)" "Not a file ruori manages -- an env var ruori injects into every worktree's container, pointing at this repo's shared, writable, cross-worktree storage (today, the common git dir above). Your own Dockerfile/entrypoint can read it to persist or live-share state across every worktree's container, e.g. a shared Claude Code login -- see docs/container-sandbox-guide.md's 'Recipe: Claude Code auth'. ruori itself never writes anything under it."
+      shared_volumes="$(docker volume ls -q --filter "name=^$(container_shared_volume_prefix)" 2>/dev/null)"
+      if [ -n "$shared_volumes" ]; then
+        while IFS= read -r shared_volume; do
+          [ -n "$shared_volume" ] || continue
+          resources_entry "$shared_volume" "Not a file -- a Docker-managed volume shared by every worktree's container of this repo, per a 'container-shared-volume' directive in $CONFIG_FILENAME (e.g. a pnpm store, so packages are downloaded once per repo rather than once per worktree -- see docs/container-sandbox-guide.md's 'Recipe: a Node.js monorepo'). Created the first time any container that mounts it starts. Never removed by 'ruori rm' (other worktrees still use it); remove it yourself with 'docker volume rm $shared_volume' once no container mounts it -- listed here by name prefix, so it still shows up even if that directive has since been removed."
+        done <<<"$shared_volumes"
+      fi
     else
       resources_entry "(none)" "Container mode is off for this repo, so ruori builds no image -- see the 'container' directive in $CONFIG_FILENAME to turn it on."
     fi

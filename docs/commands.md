@@ -193,7 +193,10 @@ never re-copied into an already-running container — see
   Docker can't change the mounts of an existing container. `ruori`
   prints `container-volume targets changed (+…); run 'ruori rebuild
   <branch>' to apply` on a switch whenever that's pending; the new
-  subpaths start empty, the rest keep their data.
+  subpaths start empty, the rest keep their data. The same goes for
+  `container-shared-volume` lines; the shared volumes themselves are
+  never touched by a rebuild (or by `ruori rm`), since other
+  worktrees' containers mount them too.
 - Confirms interactively first (`[y/N]`), since it discards whatever
   state lived only inside the old container.
 
@@ -254,6 +257,13 @@ to default to whichever worktree is "current" (the `*` marker). See
 [config-file.md](config-file.md) and the
 [container sandbox guide](container-sandbox-guide.md) for detail on
 the configuration-driven pieces it points at.
+
+In container mode, the Repository scope under managed resources also
+lists every `container-shared-volume` Docker volume of this repo (by
+name prefix, so one whose directive has since been removed still
+shows up) — the one kind of volume `ruori rm` never removes, since
+every worktree's container shares it; remove it yourself with `docker
+volume rm` when you no longer need it.
 
 ## `ruori init`
 
