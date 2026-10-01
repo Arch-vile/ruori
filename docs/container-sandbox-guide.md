@@ -212,19 +212,41 @@ with none of these behaves exactly as it does today.
   shell). Editing the command list later needs `ruori rebuild <branch>`
   to take effect, exactly like `container-copy`.
 
-- **`container-env <NAME>`** — repeatable, one per host environment
-  variable to forward into the container. `ruori` looks up `<NAME>` in
-  its *own* process environment — the shell you launched `ruori` from,
-  since `ruori` runs as one long-lived process across an entire picker
-  session rather than re-executing per worktree switch — at
-  container-creation time, and passes it through as `-e
-  <NAME>=<value>`. A name with nothing set in `ruori`'s environment is
-  silently skipped, not forwarded as an empty string, so it can't
-  override an `ENV` default the image's own Dockerfile already sets.
-  Like `container-copy`, only ever applied at creation — Docker has no
-  way to add an env var to an existing container, so `ruori rebuild
-  <branch>` is what picks up a changed value. See "Recipe: git commit
-  identity" below for the motivating use case.
+- **`container-env <NAME>`** / **`container-env <NAME>=<value>`** —
+  repeatable, one per environment variable to set in the container,
+  in the same two forms as `docker run -e`:
+
+  ```
+  # .ruori.conf
+  container-env GIT_AUTHOR_NAME             # forward the host's value
+  container-env APP_ENV=development         # set a fixed value
+  container-env DATABASE_URL=postgres://db:5432/app
+  ```
+
+  A bare `<NAME>` is looked up in `ruori`'s *own* process environment —
+  the shell you launched `ruori` from, since `ruori` runs as one
+  long-lived process across an entire picker session rather than
+  re-executing per worktree switch — at container-creation time, and
+  passed through as `-e <NAME>=<value>`. A bare name with nothing set
+  in `ruori`'s environment is silently skipped, not forwarded as an
+  empty string, so it can't override an `ENV` default the image's own
+  Dockerfile already sets.
+
+  `<NAME>=<value>` ignores the host entirely and sets `<value>` exactly
+  as written: everything after the first `=` to the end of the line
+  (inner spaces kept, surrounding whitespace trimmed), with no quote
+  stripping and no `$VAR`/`~` expansion — write `APP_ENV=dev`, not
+  `APP_ENV="dev"`. `<NAME>=` with nothing after it deliberately sets an
+  empty string. Since `#` starts a comment anywhere in `.ruori.conf`,
+  a literal value can't contain `#`; forward it from the host with the
+  bare form instead. A `<NAME>` that isn't a valid variable name is
+  warned about and skipped.
+
+  Either way, like `container-copy`, it's only ever applied at
+  creation — Docker has no way to add an env var to an existing
+  container, so `ruori rebuild <branch>` is what picks up a changed
+  line or host value. See "Recipe: git commit identity" below for the
+  motivating use case.
 
 ## Automatic environment: `RUORI_SHARED_DIR`
 
@@ -696,7 +718,18 @@ variable at container creation, never again.
 If you'd rather commits made inside the container be attributed to
 something other than your personal identity — the same
 dedicated-identity reasoning as the recipes above — skip either of the
-above and bake a fixed identity into the Dockerfile instead:
+above and give it a fixed identity instead — either straight from
+`.ruori.conf`, with `container-env`'s literal form (these env vars take
+precedence over any git config, the copied `~/.gitconfig` included):
+
+```
+container-env GIT_AUTHOR_NAME=ruori agent
+container-env GIT_AUTHOR_EMAIL=agent@example.invalid
+container-env GIT_COMMITTER_NAME=ruori agent
+container-env GIT_COMMITTER_EMAIL=agent@example.invalid
+```
+
+or baked into the Dockerfile:
 
 ```dockerfile
 RUN git config --system user.name "ruori agent" \
@@ -843,7 +876,7 @@ than the developer's own host namespace.
 | `container-volume` | n/a (storage swap, not a copy) | once, at container **creation** (`ruori rebuild` to apply an added/removed line) | that one subpath backed by a Docker volume on native storage — starts **empty**, never touches the host |
 | `container-shared-volume` | n/a (shared storage, not a copy) | once, at container **creation** (`ruori rebuild` to apply an added/removed line) | one Docker volume per **repo**, mounted at the same absolute path in every worktree's container — unlike `RUORI_SHARED_DIR`, which is also shared but lives on the (slower) host bind mount |
 | `container-init` | n/a (arbitrary command) | once, at container **creation**, after `container-copy` (`ruori rebuild` to apply an added/removed/changed line) | whatever the command itself does — `ruori` tracks no specific resulting file |
-| `container-env` | host → container (env only, from `ruori`'s own process) | once, at container **creation** (`ruori rebuild` to apply a changed/added/removed line) | an env var in the container process — **never written to any file** |
+| `container-env` | host → container for a bare `NAME` (env only, from `ruori`'s own process); none for `NAME=value` (literal from `.ruori.conf`) | once, at container **creation** (`ruori rebuild` to apply a changed/added/removed line) | an env var in the container process — **never written to any file** |
 
 `container-volume` looks similar to `container-copy` but does the
 opposite kind of thing: `container-copy` puts a host file's *contents*
