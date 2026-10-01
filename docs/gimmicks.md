@@ -272,7 +272,7 @@ error, not corruption. (`allocate_port_for`; plan "Open risks".)
 
 ## Credentials inside the container
 
-### Claude Code's login is in the macOS Keychain, and its files can't be symlinked
+### Claude Code's login is in the macOS Keychain, and needs two files
 
 **Fact.** Nothing on a Mac host for `container-copy` to copy. Logging
 in from inside a Linux container yields plain files — but
@@ -280,18 +280,19 @@ in from inside a Linux container yields plain files — but
 `~/.claude.json` (in `$HOME`, not under `~/.claude`) is also required.
 Neither can be symlinked to shared storage, because Claude Code writes
 both via write-then-rename and `rename()` onto a symlink replaces the
-symlink with a plain file, silently un-sharing it. With
-`CLAUDE_CONFIG_DIR` set, `~/.claude/settings.json` (the baked-in hooks)
-is ignored entirely. A plain `export` in the entrypoint doesn't reach
-tmux/`docker exec` shells. **Decision.** ruori injects
-`RUORI_SHARED_DIR` (a subdirectory of the already-mounted common git
-dir, named for purpose not implementation) into every container; the
-repo's own entrypoint sets `CLAUDE_CONFIG_DIR=$RUORI_SHARED_DIR/…` via
-`/etc/bash.bashrc` and seeds `settings.json` no-clobber. Sessions stay
-per worktree because Claude Code buckets by absolute cwd. This trades
-per-container isolation for one shared login — pair it with a
-dedicated account. (Guide "Recipe: Claude Code auth";
-`.devcontainer/entrypoint.sh`.)
+symlink with a plain file, silently un-sharing it. **Rejected.**
+Sharing one live login by pointing `CLAUDE_CONFIG_DIR` at a directory
+under `RUORI_SHARED_DIR` from the image's entrypoint — didn't carry the
+login across containers in practice, and would share every session
+transcript too. `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`)
+forwarded via `container-env` — that token can only make model
+requests, so the banner says "Claude API" even on Enterprise, `/usage`
+returns nothing, and claude.ai connectors and Remote Control don't
+work. **Decision.** Log in once inside any container, `docker cp`
+both files out to the host, and copy them into every container with
+two `container-copy` lines; each container then holds an independent,
+fully-featured login with private sessions. (Guide "Recipe: Claude
+Code auth".)
 
 ### `gh`'s `hosts.yml` may be only a Keychain reference
 
