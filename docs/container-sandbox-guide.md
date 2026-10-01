@@ -261,9 +261,8 @@ not how it's implemented, so don't hardcode assumptions about that.
 `ruori` itself never writes anything under it — it's purely there for
 your own Dockerfile/entrypoint to build on, for anything that should
 persist or stay in sync across every worktree's container rather than
-being private to one (a live-shared auth credential, e.g. — see the
-Claude Code recipe below — or any other cross-worktree cache/state your
-image wants). Read it from an `ENTRYPOINT` script, not a Dockerfile
+being private to one (any cross-worktree cache/state your image
+wants). Read it from an `ENTRYPOINT` script, not a Dockerfile
 `RUN` step — the mount (and the env var) only exist once the container
 actually starts, not at image build time.
 
@@ -472,122 +471,94 @@ the Keychain, not a plain file, so there's nothing on a Mac host for
 `container-copy` (which only ever reads a host **file**) to point at.
 Bootstrapping it from *inside* a container instead sidesteps that
 entirely — a container is Linux, so `claude` there always writes plain
-files regardless of what your host OS does.
-
-**This recipe shares one login live across every worktree's container
-for a repo, via `RUORI_SHARED_DIR` (above), rather than copying it into
-each container separately.** Log in once, in any one container, and
-every other container — existing or future, any worktree — sees it
-immediately, because they all end up reading and writing the exact
-same files.
+files regardless of what your host OS does. Log in once in any one
+container, copy the resulting files out to the host, and let
+`container-copy` put them into every container from then on.
 
 **It's not just `~/.claude/.credentials.json`.** Claude Code also
 needs `~/.claude.json` — a *sibling* file directly in `$HOME`, not
 something under `~/.claude` at all — to consider itself logged in;
-verified by hand, copying only the credentials file into a second
-container left it still showing "Not logged in," and copying
-`.claude.json` in too made it work. Neither file can just be
-symlinked to a shared location: Claude Code writes both via
-write-then-rename (same pattern most tools use to avoid ever leaving a
-half-written file on disk), and a `rename()` onto a symlink doesn't
-follow it — it deletes the symlink and drops a plain file right back
-outside the shared location, silently un-sharing itself the moment
-anyone logs in or the token refreshes.
+copying only the credentials file into a second container leaves it
+still showing "Not logged in," and copying `.claude.json` in too makes
+it work.
 
-**The fix is Claude Code's own `CLAUDE_CONFIG_DIR` env var**, which
-consolidates *everything* — `.claude.json`, `.credentials.json`,
-`settings.json`, session history — into one directory, no sibling file
-left in `$HOME` at all. Point it straight at a real directory under
-`RUORI_SHARED_DIR` and there's no symlink anywhere, so the
-rename-onto-a-symlink problem above never comes up: Claude just reads
-and writes ordinary files in an ordinary (if oddly-located) directory.
-Verified by hand: with `CLAUDE_CONFIG_DIR` set to an otherwise-empty
-directory containing only files copied from an already-logged-in
-container, a fresh container answered a real prompt correctly; with it
-unset, the same container said "Not logged in."
+1. Run `claude` in any running container and complete the login.
+   Claude Code's device-code flow needs no browser inside the
+   container — it prints a URL and code to open on any device.
+2. On the host, find that container's name or id with `docker ps` and
+   copy both files out:
 
-In your `ENTRYPOINT` script (not a `RUN` step — see above):
+   ```sh
+   mkdir -p ~/.config/ruori-claude-login
+   docker cp <container>:/root/.claude/.credentials.json ~/.config/ruori-claude-login/
+   docker cp <container>:/root/.claude.json ~/.config/ruori-claude-login/
+   chmod 600 ~/.config/ruori-claude-login/*
+   ```
 
-```sh
-if [ -n "${RUORI_SHARED_DIR:-}" ]; then
-  shared_claude_dir="$RUORI_SHARED_DIR/ruori-claude-home"
-  mkdir -p "$shared_claude_dir"
+3. Point two `container-copy` lines at them in `.ruori.conf`:
 
-  # Verified by hand: with CLAUDE_CONFIG_DIR set, Claude Code ignores
-  # ~/.claude/settings.json entirely, so this image's baked-in hooks
-  # only take effect once seeded into the shared dir -- and only the
-  # very first container ever does that seeding (the ! -e check is a
-  # no-clobber guard), so a later container never overwrites a
-  # login/history already there. Delete the shared dir yourself to
-  # force a fresh reseed after changing the Dockerfile's settings.
-  if [ -e "$HOME/.claude/settings.json" ] && [ ! -e "$shared_claude_dir/settings.json" ]; then
-    cp "$HOME/.claude/settings.json" "$shared_claude_dir/settings.json"
-  fi
+   ```
+   # Claude setup
+   container-copy ~/.config/ruori-claude-login/.credentials.json:/root/.claude/.credentials.json
+   container-copy ~/.config/ruori-claude-login/.claude.json:/root/.claude.json
+   ```
 
-  # CLAUDE_CONFIG_DIR has to be visible to whatever later runs `claude`
-  # -- the tmux session ruori attaches to, or any `docker exec` -- not
-  # just this script's own process. A plain `export` here wouldn't
-  # reach those (separate processes spawned fresh against the
-  # container's own config, not children of this script), so it goes
-  # in /etc/bash.bashrc instead, sourced by every interactive shell.
-  marker="export CLAUDE_CONFIG_DIR=\"$shared_claude_dir\""
-  grep -qxF "$marker" /etc/bash.bashrc 2>/dev/null || echo "$marker" >>/etc/bash.bashrc
-fi
-exec "$@"
-```
+4. `container-copy` runs only when a container is first created (see
+   "`container-copy` is a one-time snapshot" above), so every new
+   worktree's container comes up logged in from here on, but a
+   container that already exists needs `ruori rebuild <branch>` to get
+   the files.
 
-Then just run `claude` inside any one worktree's container and complete
-the login (Claude Code's device-code flow needs no browser inside the
-container — it prints a URL and code to open on any device). Every
-other container for this repo picks it up immediately, with nothing
-further to copy or configure.
+**Where to keep the copies.** A directory outside the repo, like
+`~/.config/ruori-claude-login/` above, is the safe default. A
+repo-relative source path (e.g. `.devcontainer/claude-login/.claude.json`)
+works too — it's resolved against the directory `ruori` itself runs
+from, i.e. the main worktree — but then that directory **must be
+gitignored**, or the next `git add -A` commits a working login to the
+repo.
 
-**One consequence worth knowing:** session transcripts/history are now
-shared across every worktree's containers for this repo too, not just
-the login — but `claude --resume`/session listing stays correctly
-scoped per worktree regardless, since Claude Code buckets sessions by
-the full absolute `cwd` path, and every worktree has a distinct one
-even when they all share the same `CLAUDE_CONFIG_DIR` (verified by
-hand: three different working directories under one shared config dir
-produced three separate, non-overlapping project buckets).
+**Requirements on the image.** Don't set `CLAUDE_CONFIG_DIR` anywhere
+in it (Dockerfile `ENV`, entrypoint, shell rc files): with it set,
+Claude Code looks for its whole config — login included — in that
+directory and ignores both copied files. If the image runs as a user
+other than root, replace `/root` in both container paths with that
+user's home.
 
-**This trades away per-container isolation — know what you're giving
-up.** Elsewhere in this guide, `container-copy`'s one-time,
-disconnected copy is treated as a feature specifically because a rogue
-container can only ever corrupt *its own* copy. Sharing via
-`RUORI_SHARED_DIR` deliberately gives that up: a rogue or compromised
-container in any one worktree can now corrupt, revoke, or exfiltrate
-the credential used by *every other worktree's* container for this
-repo too. The blast radius is still just this one repo's containers —
-not your primary host identity, not other repos — so pair this with a
-dedicated login for container use (never your daily-driver account),
-same reasoning as `gh`'s separate-identities recipe below. If you'd
-rather keep full per-container isolation and don't mind re-doing the
-login per container, use `container-copy` instead (see the directive
-above) with `~/.claude/.credentials.json` **and** `~/.claude.json` as
-sources on a Linux host, or export a container's copies of both back
-out once via `docker cp` on a Mac host and point two `container-copy`
-lines at them.
+**What you get.** Each container holds an ordinary claude.ai login,
+the same as if you had run `/login` in it yourself, so `/status` shows
+your actual plan and `/usage`, claude.ai connectors and Remote Control
+all work. Session transcripts and history stay private to each
+container — nothing but the two login files is shared.
 
-**Handling expiry:** Claude Code auto-refreshes its own short-lived
-access token on every run, using the embedded refresh token, writing
-the refreshed value straight back to the shared directory — no manual
-step needed. Only if the refresh token itself is invalidated (explicit
-logout, long inactivity, manual revoke) does `claude` start asking to
-log in again; when that happens, just log in again in any one
-container — every other container picks it up the same way it did the
-first time.
+**Handling expiry.** Each container's copy is an independent login
+from the moment it's copied in: Claude Code refreshes its own
+short-lived access token on every run and writes the result back to
+that container's files only, never to the host copies. If a container
+later starts saying "Not logged in," run `/login` in that container
+directly, or repeat steps 1–2 from any logged-in container to refresh
+the host copies and `ruori rebuild` the containers that need them.
 
-**Bonus: your status hook no longer needs to compute usage.** If your
-container-baked Claude Code status hook also writes a running cost
-total to `.ruori/agent-usage` (see `docs/container-sandbox-plan.md`),
-you can drop that half once you adopt this recipe — session transcripts
-under `$shared_claude_dir/projects` are now host-visible, so `ruori`'s
-own `USAGE` column reads them directly the same way it already does
-for host-mode worktrees (see `docs/dashboard-columns.md`). Keep writing
-`.ruori/claude-status` for the live busy/waiting/idle signal — that one
-still needs the hook, since it's event-driven and has no transcript
-equivalent.
+**These files are a full credential.** Anyone who has them is logged
+in as you, and every container gets its own copy — a rogue or
+compromised container can exfiltrate its copy just as it could if
+you'd logged in there by hand. Keep the host copies private (the
+`chmod 600` above), and prefer a dedicated login for container use
+over your daily-driver account, same reasoning as `gh`'s
+separate-identities recipe below.
+
+**Why not `CLAUDE_CODE_OAUTH_TOKEN`.** `claude setup-token` mints a
+long-lived token that every container could share through a single
+`container-env CLAUDE_CODE_OAUTH_TOKEN` line, but that token can only
+make model requests: Claude Code's banner labels such a session
+"Claude API" even on a Team/Enterprise plan, `/usage` returns nothing,
+and claude.ai connectors and Remote Control don't work. Copying a real
+login avoids all of that.
+
+**The `USAGE` column.** Session transcripts stay inside each container,
+invisible to the host, so `ruori`'s `USAGE` column only shows a
+container-mode worktree's spend if your container-baked status hook
+also writes a running total to `.ruori/agent-usage` (see
+`docs/dashboard-columns.md`).
 
 ## Recipe: GitHub CLI (`gh`) auth
 
