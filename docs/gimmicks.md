@@ -356,6 +356,19 @@ worktree remove` refuse unless it's in the **global** gitignore.
 optional `agent-usage`, so a single gitignore entry covers both.
 (`docs/dashboard-columns.md` "CLAUDE busy/waiting/idle status".)
 
+### A hook's `cwd` is the session's current directory, not the worktree root
+
+**Fact.** The `cwd` in a Claude Code hook payload follows the session
+into subdirectories — launched from, or `cd`'d into, `apps/api`, it
+reports `apps/api`. A hook writing to `$cwd/.ruori/` scatters stray
+`apps/api/.ruori/` directories that ruori never reads, and the root's
+`claude-status` goes stale. **Rejected.** `$CLAUDE_PROJECT_DIR`: it's
+the launch directory, which can itself be a subdirectory. **Decision.**
+The hook resolves `git -C "$cwd" rev-parse --show-toplevel` and writes
+there, which from a linked worktree is that worktree's root — the
+bind-mounted path ruori reads. (`docs/new-repo-setup-guide.md`'s
+`ruori-claude-status-hook` script.)
+
 ### Usage-cost scan predicts Claude Code's project-dir name — but only for the host
 
 **Fact.** `~/.claude/projects/<dir>` is the session cwd with every

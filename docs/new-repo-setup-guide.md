@@ -298,10 +298,12 @@ alongside it), then `COPY` them in:
 # so ruori's picker can show it. Invoked as a Claude Code hook with one of
 # three status arguments: busy, waiting, idle. Reads the hook's JSON
 # payload from stdin (needs "cwd") and writes to two fixed filenames at
-# the worktree root ("$cwd" — the same directory ruori bind-mounts into
-# this container, so the host sees the same files with no extra
-# plumbing). Deliberately silent/non-blocking: any failure (bad
-# payload, no cwd, unwritable worktree) just exits 0 without writing
+# the worktree root — resolved from "cwd" with git, since "cwd" is
+# Claude Code's *current* directory and may be a subdirectory (e.g.
+# apps/api) — the same directory ruori bind-mounts into this container,
+# so the host sees the same files with no extra plumbing. Deliberately
+# silent/non-blocking: any failure (bad payload, no cwd, not inside a
+# git worktree, unwritable worktree) just exits 0 without writing
 # anything, so this can never interfere with a normal Claude Code
 # session.
 set -euo pipefail
@@ -325,9 +327,13 @@ payload="$(cat)"
 cwd="$(printf '%s' "$payload" | jq -r '.cwd // empty' 2>/dev/null || true)"
 
 [ -n "$cwd" ] && [ -d "$cwd" ] || exit 0
+# "cwd" follows Claude Code into subdirectories (a session launched in,
+# or cd'd into, apps/api reports apps/api), but ruori only reads these
+# files at the worktree root.
+root="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)" || exit 0
 
-mkdir -p "$cwd/.ruori" 2>/dev/null || exit 0
-printf '%s\n%s\n' "$status" "$(date +%s)" >"$cwd/$STATUS_FILENAME" 2>/dev/null || true
+mkdir -p "$root/.ruori" 2>/dev/null || exit 0
+printf '%s\n%s\n' "$status" "$(date +%s)" >"$root/$STATUS_FILENAME" 2>/dev/null || true
 
 if [ "$status" = "idle" ]; then
   projects_dir="$HOME/.claude/projects"
@@ -336,13 +342,13 @@ if [ "$status" = "idle" ]; then
     for f in "$projects_dir"/*/*.jsonl; do
       [ -f "$f" ] || continue
       file_cwd="$(grep -m1 '"cwd":"' "$f" 2>/dev/null | jq -r '.cwd // empty' 2>/dev/null)" || true
-      [ "$file_cwd" = "$cwd" ] || continue
+      [ "$file_cwd" = "$root" ] || continue
       file_cost="$(grep '"type":"cost-state"' "$f" 2>/dev/null | tail -1 | jq -r '.totalCostUSD // empty' 2>/dev/null)" || true
       [ -n "$file_cost" ] || continue
       total="$(printf '%s\n%s\n' "$total" "$file_cost" | jq -s 'add')"
     done
   fi
-  printf '%s\n%s\n' "$total" "$(date +%s)" >"$cwd/$AGENT_USAGE_FILENAME" 2>/dev/null || true
+  printf '%s\n%s\n' "$total" "$(date +%s)" >"$root/$AGENT_USAGE_FILENAME" 2>/dev/null || true
 fi
 
 exit 0
