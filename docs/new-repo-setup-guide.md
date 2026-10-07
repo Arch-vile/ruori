@@ -342,7 +342,8 @@ if [ "$status" = "idle" ]; then
     for f in "$projects_dir"/*/*.jsonl; do
       [ -f "$f" ] || continue
       file_cwd="$(grep -m1 '"cwd":"' "$f" 2>/dev/null | jq -r '.cwd // empty' 2>/dev/null)" || true
-      [ "$file_cwd" = "$root" ] || continue
+      # A session started anywhere in this worktree counts, not just at its root.
+      case "$file_cwd" in "$root" | "$root"/*) ;; *) continue ;; esac
       file_cost="$(grep '"type":"cost-state"' "$f" 2>/dev/null | tail -1 | jq -r '.totalCostUSD // empty' 2>/dev/null)" || true
       [ -n "$file_cost" ] || continue
       total="$(printf '%s\n%s\n' "$total" "$file_cost" | jq -s 'add')"

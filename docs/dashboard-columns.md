@@ -123,7 +123,8 @@ as a fresh process. Until you press Ctrl-F at least once, `PR` shows
 
 Each worktree's total Claude Code spend in USD — the same number
 `/usage` reports — summed across every Claude Code session that's ever
-run with that worktree as its working directory. It reads this
+run in that worktree, started at its root or in any subdirectory of
+it (e.g. `apps/api`). It reads this
 straight out of Claude Code's own local transcripts
 (`~/.claude/projects/<encoded-path>/*.jsonl`, one directory per project
 path), which already contain a running cost total per session; no

@@ -379,7 +379,13 @@ visible). But a container session's cwd is *not* guaranteed to equal
 the host path (a `WORKDIR /workspace`, or a bare `docker exec bash`),
 so the filter can't be applied to the `RUORI_SHARED_DIR` scan.
 `*/subagents/*.jsonl` is skipped because its cost is already rolled
-into the parent session. (`fetch_usage_costs`.)
+into the parent session. A session started in a subdirectory encodes
+as the worktree's name plus `-<subdir>`, so the pre-filter is a prefix
+match, which also admits lookalike siblings (`foo` admits `foo-bar`).
+That's harmless because the transcript's real cwd is then matched
+against worktree paths by longest parent, which also keeps a nested
+worktree's sessions out of its parent's total. (`fetch_usage_costs`,
+`worktree_for_session_cwd`.)
 
 ### `printf %.2f` is locale-sensitive
 

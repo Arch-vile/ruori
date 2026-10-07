@@ -1730,8 +1730,9 @@ load_usage_cost_cache() {
 # cost is already rolled into the parent session's. Sums each matching
 # file's last "cost-state" line's totalCostUSD (that field is already
 # a running total for the session, so only the last one per file
-# counts) for files whose cwd matches one of this repo's worktree
-# paths. Persists via save_usage_cost_cache. Silently skips a scan root
+# counts) for files whose cwd is one of this repo's worktree paths or
+# anywhere under one -- a session started in apps/api belongs to its
+# worktree as much as one started at the root. Persists via save_usage_cost_cache. Silently skips a scan root
 # if `jq` is missing or it doesn't exist (e.g. Claude Code hooks were
 # never used, or this repo doesn't share auth this way) — best-effort
 # extra, like the PR column.
@@ -1750,37 +1751,61 @@ fetch_usage_costs() {
     done
   fi
 
-  # Fast membership check so we skip the (more expensive) cost extraction
-  # for the many session files that belong to other repos entirely.
-  local -A wanted_paths=()
   local p
-  for p in "${paths[@]}"; do
-    wanted_paths["$p"]=1
-  done
 
   # Claude Code names each ~/.claude/projects subdirectory after the
   # cwd its sessions ran in, with every non-alphanumeric character
   # replaced by '-' (e.g. "/Users/me/git/foo" -> "-Users-me-git-foo").
   # This is a *forward* encoding of a cwd we already know (this repo's
   # own worktree paths) — not an attempt to invert an unknown one — so
-  # it's safe to use as an exact-match pre-filter: skip a whole
-  # directory, and every session transcript inside it, without opening
-  # a single file, if its name can't possibly belong to one of this
-  # repo's worktrees. On a machine with many repos this is the
+  # it's safe to use as a pre-filter: skip a whole directory, and every
+  # session transcript inside it, without opening a single file, if its
+  # name can't possibly belong to one of this repo's worktrees. A
+  # session started in a subdirectory encodes as the worktree's name
+  # plus "-<subdir>", so the filter accepts that prefix too. That
+  # over-matches a sibling ("foo" accepts "foo-bar"), which is harmless:
+  # worktree_for_session_cwd still checks the real cwd. On a machine with many repos this is the
   # difference between reading a handful of files and reading every
   # session transcript ever recorded, host-wide, on every `ruori
   # list`/`details`/Ctrl-F fetch.
-  local -A wanted_dir_names=()
+  local -a wanted_dir_names=()
   for p in "${paths[@]}"; do
-    wanted_dir_names["$(printf '%s' "$p" | tr -c 'A-Za-z0-9' '-')"]=1
+    wanted_dir_names+=("$(printf '%s' "$p" | tr -c 'A-Za-z0-9' '-')")
   done
 
-  local projects_dir f cwd cost dir_name project_subdir
+  local projects_dir f cwd cost dir_name project_subdir worktree
+
+  # Succeeds if $1 (a ~/.claude/projects subdirectory name) is one of
+  # wanted_dir_names, or one of them followed by "-<subdir>".
+  project_dir_name_wanted() {
+    local wanted
+    for wanted in ${wanted_dir_names[@]+"${wanted_dir_names[@]}"}; do
+      case "$1" in
+        "$wanted" | "$wanted"-*) return 0 ;;
+      esac
+    done
+    return 1
+  }
+
+  # Echoes the worktree path $1 (a session's recorded cwd) belongs to:
+  # the longest of this repo's worktree paths that is $1 itself or a
+  # parent of it, so a worktree nested inside another one still claims
+  # its own sessions. Fails if none.
+  worktree_for_session_cwd() {
+    local cwd="$1" p best=""
+    for p in "${paths[@]}"; do
+      case "$cwd" in
+        "$p" | "$p"/*) [ "${#p}" -gt "${#best}" ] && best="$p" ;;
+      esac
+    done
+    [ -n "$best" ] || return 1
+    printf '%s' "$best"
+  }
 
   # Reads $1 (a session transcript jsonl file) and, if its recorded cwd
-  # is one of this repo's worktree paths, adds its last cost-state
-  # total into usage_cost_map. A local function (bash's dynamic scoping
-  # means it sees wanted_paths/usage_cost_map from the enclosing call)
+  # is in one of this repo's worktrees, adds its last cost-state total
+  # into that worktree's usage_cost_map entry. A local function (bash's
+  # dynamic scoping means it sees usage_cost_map from the enclosing call)
   # so both scan shapes below — filtered and unfiltered — share one
   # implementation.
   scan_usage_cost_file() {
@@ -1794,19 +1819,19 @@ fetch_usage_costs() {
     # runs.
     cwd="$(grep -m1 '"cwd":"' "$f" 2>/dev/null | jq -r '.cwd // empty' 2>/dev/null)" || true
     [ -n "$cwd" ] || return 0
-    [ -n "${wanted_paths[$cwd]:-}" ] || return 0
+    worktree="$(worktree_for_session_cwd "$cwd")" || return 0
     cost="$(grep '"type":"cost-state"' "$f" 2>/dev/null | tail -1 | jq -r '.totalCostUSD // empty' 2>/dev/null)" || true
     [ -n "$cost" ] || return 0
-    usage_cost_map["$cwd"]="$(printf '%s\n%s\n' "${usage_cost_map[$cwd]:-0}" "$cost" | jq -s 'add')"
+    usage_cost_map["$worktree"]="$(printf '%s\n%s\n' "${usage_cost_map[$worktree]:-0}" "$cost" | jq -s 'add')"
   }
 
   for projects_dir in "${projects_dirs[@]}"; do
     [ -d "$projects_dir" ] || continue
     if [ "$projects_dir" = "$HOME/.claude/projects" ]; then
       # The directory-name pre-filter only applies here: a host-mode
-      # session's recorded cwd is guaranteed to be the worktree path it
-      # ran in (see activate_worktree's `tmux new-session -c
-      # "$target_path"`). A container-mode session's cwd is NOT
+      # session's recorded cwd is always the host path it ran in --
+      # the worktree root (see activate_worktree's `tmux new-session -c
+      # "$target_path"`) or a subdirectory of it. A container-mode session's cwd is NOT
       # guaranteed to equal the host worktree path it's bind-mounted at
       # — e.g. a Dockerfile whose entrypoint runs Claude Code from a
       # fixed WORKDIR instead of cd-ing into the mount — so applying
@@ -1816,7 +1841,7 @@ fetch_usage_costs() {
       for project_subdir in "$projects_dir"/*/; do
         [ -d "$project_subdir" ] || continue
         dir_name="$(basename "$project_subdir")"
-        [ -n "${wanted_dir_names[$dir_name]:-}" ] || continue
+        project_dir_name_wanted "$dir_name" || continue
         for f in "$project_subdir"*.jsonl; do
           [ -f "$f" ] || continue
           scan_usage_cost_file "$f"
