@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# ruori-claude-statusline - records this Claude Code session's running
+# ruori-claude-usage-statusline - records this Claude Code session's running
 # cost for ruori's USAGE column. Configured as Claude Code's statusLine
 # command (with "refreshInterval": 5), so Claude Code runs it every few
-# seconds with the session's JSON on stdin. Writes
+# seconds with the session's JSON on stdin. Copy it unchanged: if the
+# image already had a status-line command, pass that command as this
+# script's arguments in settings.json instead of editing anything here. Writes
 # cost.total_cost_usd to .ruori/usage/<session_id> at the worktree root
 # (resolved from "cwd" with git, since "cwd" may be a subdirectory) —
 # the same directory ruori bind-mounts into this container, so the host
@@ -17,11 +19,6 @@
 set -uo pipefail
 
 USAGE_DIRNAME=".ruori/usage"
-
-# Optional: a status-line command this image had before. It gets the
-# same JSON on stdin and its output is shown instead of ours; the usage
-# file is written either way.
-STATUSLINE_CHAIN=""
 
 payload="$(cat)"
 # One jq call; joined on the unit separator rather than a tab, since
@@ -53,8 +50,11 @@ record_usage() {
 
 record_usage
 
-if [ -n "$STATUSLINE_CHAIN" ]; then
-  printf '%s' "$payload" | bash -c "$STATUSLINE_CHAIN" 2>/dev/null
+# Arguments, if any, are the image's previous status-line command: it
+# gets the same JSON on stdin and its output is shown instead of ours.
+# The usage file is written either way.
+if [ "$#" -gt 0 ]; then
+  printf '%s' "$payload" | "$@" 2>/dev/null
 else
   LC_ALL=C awk -v c="${cost:-0}" 'BEGIN { printf "$%.2f\n", c + 0 }'
 fi

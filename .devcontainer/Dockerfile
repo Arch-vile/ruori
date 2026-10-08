@@ -11,8 +11,8 @@ RUN curl -fsSL https://claude.ai/install.sh | bash
 ENV PATH="/root/.local/bin:${PATH}"
 COPY .devcontainer/ruori-claude-status-hook /usr/local/bin/ruori-claude-status-hook
 RUN chmod +x /usr/local/bin/ruori-claude-status-hook
-COPY .devcontainer/ruori-claude-statusline /usr/local/bin/ruori-claude-statusline
-RUN chmod +x /usr/local/bin/ruori-claude-statusline
+COPY .devcontainer/ruori-claude-usage-statusline /usr/local/bin/ruori-claude-usage-statusline
+RUN chmod +x /usr/local/bin/ruori-claude-usage-statusline
 COPY .devcontainer/claude-settings.json /root/.claude/settings.json
 COPY .devcontainer/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh

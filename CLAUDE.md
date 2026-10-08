@@ -97,7 +97,7 @@ change:
 7. **Claude Code status integration** — `.ruori/claude-status` (written
    by an *external* agent hook) and `.ruori/usage/<session_id>` (one
    file per session, written by an external status-line script, see
-   `ruori-claude-statusline` in `docs/new-repo-setup-guide.md`) live
+   `ruori-claude-usage-statusline` in `docs/new-repo-setup-guide.md`) live
    under one `.ruori/` subdirectory at a worktree's root (see
    `docs/dashboard-columns.md`); `ruori` only reads them,
    host/container-transparently, and never installs any hook or status

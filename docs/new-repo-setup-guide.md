@@ -329,7 +329,7 @@ alongside it), then `COPY` them in:
 # writing anything, so this can never interfere with a normal Claude
 # Code session.
 #
-# Status only: the USAGE column comes from ruori-claude-statusline
+# Status only: the USAGE column comes from ruori-claude-usage-statusline
 # instead (see docs/new-repo-setup-guide.md).
 set -euo pipefail
 
@@ -362,14 +362,16 @@ printf '%s\n%s\n' "$status" "$(date +%s)" >"$root/$STATUS_FILENAME" 2>/dev/null 
 exit 0
 ```
 
-`.devcontainer/ruori-claude-statusline`:
+`.devcontainer/ruori-claude-usage-statusline`:
 
 ```bash
 #!/usr/bin/env bash
-# ruori-claude-statusline - records this Claude Code session's running
+# ruori-claude-usage-statusline - records this Claude Code session's running
 # cost for ruori's USAGE column. Configured as Claude Code's statusLine
 # command (with "refreshInterval": 5), so Claude Code runs it every few
-# seconds with the session's JSON on stdin. Writes
+# seconds with the session's JSON on stdin. Copy it unchanged: if the
+# image already had a status-line command, pass that command as this
+# script's arguments in settings.json instead of editing anything here. Writes
 # cost.total_cost_usd to .ruori/usage/<session_id> at the worktree root
 # (resolved from "cwd" with git, since "cwd" may be a subdirectory) —
 # the same directory ruori bind-mounts into this container, so the host
@@ -384,11 +386,6 @@ exit 0
 set -uo pipefail
 
 USAGE_DIRNAME=".ruori/usage"
-
-# Optional: a status-line command this image had before. It gets the
-# same JSON on stdin and its output is shown instead of ours; the usage
-# file is written either way.
-STATUSLINE_CHAIN=""
 
 payload="$(cat)"
 # One jq call; joined on the unit separator rather than a tab, since
@@ -420,8 +417,11 @@ record_usage() {
 
 record_usage
 
-if [ -n "$STATUSLINE_CHAIN" ]; then
-  printf '%s' "$payload" | bash -c "$STATUSLINE_CHAIN" 2>/dev/null
+# Arguments, if any, are the image's previous status-line command: it
+# gets the same JSON on stdin and its output is shown instead of ours.
+# The usage file is written either way.
+if [ "$#" -gt 0 ]; then
+  printf '%s' "$payload" | "$@" 2>/dev/null
 else
   LC_ALL=C awk -v c="${cost:-0}" 'BEGIN { printf "$%.2f\n", c + 0 }'
 fi
@@ -442,7 +442,7 @@ after a reply never reaches the file:
 
 ```json
 {
-  "statusLine": { "type": "command", "command": "ruori-claude-statusline", "refreshInterval": 5 },
+  "statusLine": { "type": "command", "command": "ruori-claude-usage-statusline", "refreshInterval": 5 },
   "hooks": {
     "UserPromptSubmit": [
       { "hooks": [{ "type": "command", "command": "ruori-claude-status-hook busy", "timeout": 5 }] }
@@ -474,8 +474,8 @@ Then, in the Dockerfile, after `git`/`tmux`/`jq` are installed:
 ```dockerfile
 COPY .devcontainer/ruori-claude-status-hook /usr/local/bin/ruori-claude-status-hook
 RUN chmod +x /usr/local/bin/ruori-claude-status-hook
-COPY .devcontainer/ruori-claude-statusline /usr/local/bin/ruori-claude-statusline
-RUN chmod +x /usr/local/bin/ruori-claude-statusline
+COPY .devcontainer/ruori-claude-usage-statusline /usr/local/bin/ruori-claude-usage-statusline
+RUN chmod +x /usr/local/bin/ruori-claude-usage-statusline
 # $HOME here must match whichever user actually runs Claude Code in
 # this image — /root unless a Dockerfile USER directive says otherwise;
 # copy to both homes if you're not sure which one applies.
@@ -488,15 +488,18 @@ silently breaks the `USAGE` column if missed:
 - **An existing status line.** Claude Code has exactly one. If the
   image (or an existing `claude-settings.json`) already sets a
   `statusLine` command, don't replace it: keep ours as the
-  `statusLine`, and put the old command in the script's
-  `STATUSLINE_CHAIN` variable, so its output is still what the user
-  sees.
+  `statusLine` and append the old command as its arguments
+  (`"command": "ruori-claude-usage-statusline <old command>"`), so the
+  old command's output is still what the user sees. The script itself
+  is always copied unchanged. If the old command is more than a single
+  program call (a pipeline, say), put it in its own small script first
+  and pass that.
 - **A committed project-level `statusLine`.** A `statusLine` in the
   repo's own `.claude/settings.json` or `.claude/settings.local.json`
   takes precedence over the user-level settings baked in here, so ours
   would never run. If one exists, tell the user plainly; the fix is
-  theirs to choose (move it into `STATUSLINE_CHAIN` instead, or accept
-  that `USAGE` stays `-`).
+  theirs to choose (move it into the image's settings as arguments to
+  ours, as above, or accept that `USAGE` stays `-`).
 - **`CLAUDE_CONFIG_DIR`.** If the image or its entrypoint sets
   `CLAUDE_CONFIG_DIR`, Claude Code ignores `~/.claude/settings.json`
   entirely, so both the hooks and the status line must end up in
@@ -568,7 +571,7 @@ Only after the user confirms:
 2. Write the confirmed Dockerfile at the confirmed path (default
    `.devcontainer/Dockerfile`, relative to the main worktree root),
    unless the plan reused an existing one unchanged.
-3. Write `ruori-claude-status-hook`, `ruori-claude-statusline` and
+3. Write `ruori-claude-status-hook`, `ruori-claude-usage-statusline` and
    `claude-settings.json` next to it (if the agent is Claude Code), per
    the Dockerfile section above.
 

@@ -12,7 +12,7 @@
 # writing anything, so this can never interfere with a normal Claude
 # Code session.
 #
-# Status only: the USAGE column comes from ruori-claude-statusline
+# Status only: the USAGE column comes from ruori-claude-usage-statusline
 # instead (see docs/new-repo-setup-guide.md).
 set -euo pipefail
 

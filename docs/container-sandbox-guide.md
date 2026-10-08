@@ -557,7 +557,7 @@ login avoids all of that.
 **The `USAGE` column.** Session transcripts stay inside each container,
 invisible to the host, and `ruori` doesn't read them anyway: a
 container-mode worktree's `USAGE` comes from the per-session files
-`ruori-claude-statusline` writes to `.ruori/usage/` (see
+`ruori-claude-usage-statusline` writes to `.ruori/usage/` (see
 `docs/new-repo-setup-guide.md` and `docs/dashboard-columns.md`), so it
 works the same with this recipe as without it. Copying only the two
 login files leaves the image's baked-in `~/.claude/settings.json` (and

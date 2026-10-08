@@ -1464,7 +1464,7 @@ CLAUDE_STATUS_FILENAME=".ruori/claude-status"
 # Directory, at the worktree root, holding one file per agent session:
 # the file is named after the session id and its first line is that
 # session's running cost in USD. In container mode it is the whole
-# source of the USAGE column: ruori-claude-statusline (see
+# source of the USAGE column: ruori-claude-usage-statusline (see
 # docs/new-repo-setup-guide.md) writes it from Claude Code's status
 # line, inside the container, onto the bind-mounted worktree, so it
 # survives container rebuilds and needs no transcript reading. Each
@@ -2479,7 +2479,7 @@ case "$cmd" in
     resources_scope "Worktree"
     resources_entry "$worktree_path/.ruori" "Everything an external agent hook or status line writes at this worktree's root lives under this one directory -- not written by ruori itself, but ruori only ever reads the well-known entries below from it. Needs a **global** gitignore entry (not a per-repo one), or 'git worktree remove' will refuse to remove this worktree."
     resources_entry "$worktree_path/$CLAUDE_STATUS_FILENAME" "You don't write this, but it's worth knowing about: it's what makes the picker's CLAUDE (busy/waiting/idle) column work for this worktree. Written by Claude Code's own hooks -- baked into this repo's container image following the guide 'ruori init' copies out, never by ruori itself -- every time Claude's status changes. Only present/updated if this worktree runs in container mode."
-    resources_entry "$worktree_path/$AGENT_USAGE_DIRNAME" "Same story as the status file above: not written by ruori. Container mode only -- the whole source of the USAGE column there, read live on every picker redraw with no Ctrl-F needed. One file per Claude Code session, named after its session id, holding that session's running cost; written by the container's ruori-claude-statusline (Claude Code's status line, see docs/new-repo-setup-guide.md) every few seconds while the session runs. Files from finished sessions stay and keep counting; delete the directory to reset this worktree's USAGE to zero."
+    resources_entry "$worktree_path/$AGENT_USAGE_DIRNAME" "Same story as the status file above: not written by ruori. Container mode only -- the whole source of the USAGE column there, read live on every picker redraw with no Ctrl-F needed. One file per Claude Code session, named after its session id, holding that session's running cost; written by the container's ruori-claude-usage-statusline (Claude Code's status line, see docs/new-repo-setup-guide.md) every few seconds while the session runs. Files from finished sessions stay and keep counting; delete the directory to reset this worktree's USAGE to zero."
 
     resources_section "Configuration"
     resources_scope "Global"

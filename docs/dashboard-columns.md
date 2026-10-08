@@ -133,7 +133,7 @@ either way. Where the number comes from depends on the repo's mode.
 **Container mode** reads one small file per Claude Code session from
 `.ruori/usage/` at the worktree root: each is named after the session
 id and holds that session's running cost. They're written from inside
-the container by `ruori-claude-statusline`, a script set as Claude
+the container by `ruori-claude-usage-statusline`, a script set as Claude
 Code's status line in the repo's own image (see
 `docs/new-repo-setup-guide.md`), which Claude Code re-runs every few
 seconds with the session's JSON — including `cost.total_cost_usd`.

@@ -367,8 +367,8 @@ the launch directory, which can itself be a subdirectory. **Decision.**
 The hook resolves `git -C "$cwd" rev-parse --show-toplevel` and writes
 there, which from a linked worktree is that worktree's root — the
 bind-mounted path ruori reads. The status line's `cwd` behaves the same,
-so `ruori-claude-statusline` does the same. (`docs/new-repo-setup-guide.md`'s
-`ruori-claude-status-hook` and `ruori-claude-statusline` scripts.)
+so `ruori-claude-usage-statusline` does the same. (`docs/new-repo-setup-guide.md`'s
+`ruori-claude-status-hook` and `ruori-claude-usage-statusline` scripts.)
 
 ### Container USAGE comes from the status line, never from transcripts
 
@@ -384,7 +384,7 @@ twice (host scan and hook) and drifted. Claude Code's status line gets
 `claude_code.cost.usage` (exact, but needs a running OTLP collector,
 and drops data while it's down); Anthropic's Claude Code / Enterprise
 Analytics APIs (per user per day, need a Console or Enterprise org,
-nothing per directory). **Decision.** `ruori-claude-statusline` writes
+nothing per directory). **Decision.** `ruori-claude-usage-statusline` writes
 `.ruori/usage/<session_id>` at the worktree root and `usage_cost_for`
 sums the files. (`AGENT_USAGE_DIRNAME`, `usage_cost_for`,
 `docs/new-repo-setup-guide.md`.)
@@ -399,7 +399,7 @@ sums the files. (`AGENT_USAGE_DIRNAME`, `usage_cost_for`,
 earlier total instead of restarting at $0. The docs say neither
 outright. **Decision.** Each session overwrites only its own file, and
 a value is never lowered, so a stray lower reading can't shrink a
-recorded total. (`ruori-claude-statusline`.)
+recorded total. (`ruori-claude-usage-statusline`.)
 
 ### The status line misses trailing spend unless `refreshInterval` is set
 
@@ -449,7 +449,7 @@ worktree's sessions out of its parent's total. (`fetch_usage_costs`,
 `awk` parses numbers by locale too: under `LC_ALL=fi_FI.UTF-8` it read
 `1.5` as `1`, and an `LC_ALL` overrides `LC_NUMERIC=C`. **Decision.**
 `LC_NUMERIC=C printf`, and `LC_ALL=C awk` wherever awk does arithmetic.
-(`usage_cost_for`, `ruori-claude-statusline`.)
+(`usage_cost_for`, `ruori-claude-usage-statusline`.)
 
 ### `gh pr list` per branch, never one repo-wide call
 
