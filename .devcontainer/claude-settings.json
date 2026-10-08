@@ -1,4 +1,5 @@
 {
+  "statusLine": { "type": "command", "command": "ruori-claude-usage-statusline", "refreshInterval": 5 },
   "hooks": {
     "UserPromptSubmit": [
       { "hooks": [{ "type": "command", "command": "ruori-claude-status-hook busy", "timeout": 5 }] }

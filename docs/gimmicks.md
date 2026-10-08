@@ -353,26 +353,103 @@ is host/container-transparent via the existing bind mount and
 auto-cleaned on removal — but as an untracked file it makes `git
 worktree remove` refuse unless it's in the **global** gitignore.
 **Decision.** One `.ruori/` directory holding `claude-status` and the
-optional `agent-usage`, so a single gitignore entry covers both.
+`usage/` per-session files, so a single gitignore entry covers both.
 (`docs/dashboard-columns.md` "CLAUDE busy/waiting/idle status".)
 
-### Usage-cost scan predicts Claude Code's project-dir name — but only for the host
+### A hook's `cwd` is the session's current directory, not the worktree root
+
+**Fact.** The `cwd` in a Claude Code hook payload follows the session
+into subdirectories — launched from, or `cd`'d into, `apps/api`, it
+reports `apps/api`. A hook writing to `$cwd/.ruori/` scatters stray
+`apps/api/.ruori/` directories that ruori never reads, and the root's
+`claude-status` goes stale. **Rejected.** `$CLAUDE_PROJECT_DIR`: it's
+the launch directory, which can itself be a subdirectory. **Decision.**
+The hook resolves `git -C "$cwd" rev-parse --show-toplevel` and writes
+there, which from a linked worktree is that worktree's root — the
+bind-mounted path ruori reads. The status line's `cwd` behaves the same,
+so `ruori-claude-usage-statusline` does the same. (`docs/new-repo-setup-guide.md`'s
+`ruori-claude-status-hook` and `ruori-claude-usage-statusline` scripts.)
+
+### Container USAGE comes from the status line, never from transcripts
+
+**Fact.** Container transcripts live only in the container's own
+filesystem, so a hook that recomputed a total from them and
+**overwrote** `.ruori/agent-usage` lost all history on every `ruori
+rebuild`. The transcript format it parsed (`"type":"cost-state"`, the
+first line's `cwd`) is undocumented, and the same matching logic lived
+twice (host scan and hook) and drifted. Claude Code's status line gets
+`session_id` and `cost.total_cost_usd` on stdin, both documented.
+**Rejected.** Reading the session's own transcript at `SessionEnd`
+(still the undocumented format); OpenTelemetry's
+`claude_code.cost.usage` (exact, but needs a running OTLP collector,
+and drops data while it's down); Anthropic's Claude Code / Enterprise
+Analytics APIs (per user per day, need a Console or Enterprise org,
+nothing per directory). **Decision.** `ruori-claude-usage-statusline` writes
+`.ruori/usage/<session_id>` at the worktree root and `usage_cost_for`
+sums the files. (`AGENT_USAGE_DIRNAME`, `usage_cost_for`,
+`docs/new-repo-setup-guide.md`.)
+
+### One file per session is exact because of how `/clear` and resume behave
+
+**Fact.** Tested on Claude Code 2.1.292 with hooks logging the
+`session_id`: `/clear` fires `SessionEnd` (reason `clear`) then
+`SessionStart` (source `clear`) with a **new** id and transcript.
+`claude --continue` fires `SessionStart` (source `resume`) with the
+**same** id, and the status line's `total_cost_usd` carries on from the
+earlier total instead of restarting at $0. The docs say neither
+outright. **Decision.** Each session overwrites only its own file, and
+a value is never lowered, so a stray lower reading can't shrink a
+recorded total. (`ruori-claude-usage-statusline`.)
+
+### The status line misses trailing spend unless `refreshInterval` is set
+
+**Fact.** The status line only re-runs on events (a new reply,
+`/compact`, …). Claude Code makes a background request after a reply,
+so the last value the status line saw was $0.00503 while the session's
+real total was $0.00730. With `"refreshInterval": 5` the timed re-run
+picked that spend up seconds later and the final value matched the
+transcript total exactly. **Decision.** `refreshInterval: 5` is part
+of the required settings, not cosmetic; the script skips the write
+when the value hasn't risen, so the timer costs one `jq` call.
+Anything spent in the last few seconds before exit can still be
+missed, until a resume re-runs the status line. (Guide's
+`claude-settings.json`.)
+
+### With `CLAUDE_CONFIG_DIR` set, baked-in settings only arrive by merging
+
+**Fact.** Claude Code ignores `~/.claude/settings.json` entirely once
+`CLAUDE_CONFIG_DIR` is set, and this repo's own entrypoint points it at
+a shared directory under `RUORI_SHARED_DIR` that outlives every image.
+Its old one-time, no-clobber seed meant a new `statusLine` in the
+Dockerfile's settings never reached an existing shared config.
+**Decision.** The entrypoint merges the baked `hooks` and `statusLine`
+keys into the shared `settings.json` on every start (temp file + `mv`,
+every other key kept, never fatal). (`.devcontainer/entrypoint.sh`.)
+
+### Host-mode usage scan predicts Claude Code's project-dir name
 
 **Fact.** `~/.claude/projects/<dir>` is the session cwd with every
 non-alphanumeric character replaced by `-`, so worktree paths can be
 forward-encoded as an exact pre-filter instead of opening every
 transcript on the machine (`file-io.log` made the host-wide scan
-visible). But a container session's cwd is *not* guaranteed to equal
-the host path (a `WORKDIR /workspace`, or a bare `docker exec bash`),
-so the filter can't be applied to the `RUORI_SHARED_DIR` scan.
+visible). Host mode only — container mode never scans transcripts.
 `*/subagents/*.jsonl` is skipped because its cost is already rolled
-into the parent session. (`fetch_usage_costs`.)
+into the parent session. A session started in a subdirectory encodes
+as the worktree's name plus `-<subdir>`, so the pre-filter is a prefix
+match, which also admits lookalike siblings (`foo` admits `foo-bar`).
+That's harmless because the transcript's real cwd is then matched
+against worktree paths by longest parent, which also keeps a nested
+worktree's sessions out of its parent's total. (`fetch_usage_costs`,
+`worktree_for_session_cwd`.)
 
-### `printf %.2f` is locale-sensitive
+### `printf %.2f` and `awk` are locale-sensitive
 
 **Fact.** Under `fi_FI.UTF-8`, `printf '%.2f' 34.81` fails with
 "invalid number" and `set -e` kills the picker; jq always emits `.`.
-**Decision.** `LC_NUMERIC=C printf`. (`usage_cost_for`.)
+`awk` parses numbers by locale too: under `LC_ALL=fi_FI.UTF-8` it read
+`1.5` as `1`, and an `LC_ALL` overrides `LC_NUMERIC=C`. **Decision.**
+`LC_NUMERIC=C printf`, and `LC_ALL=C awk` wherever awk does arithmetic.
+(`usage_cost_for`, `ruori-claude-usage-statusline`.)
 
 ### `gh pr list` per branch, never one repo-wide call
 

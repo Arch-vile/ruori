@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# ruori-claude-usage-statusline - records this Claude Code session's running
+# cost for ruori's USAGE column. Configured as Claude Code's statusLine
+# command (with "refreshInterval": 5), so Claude Code runs it every few
+# seconds with the session's JSON on stdin. Copy it unchanged: if the
+# image already had a status-line command, pass that command as this
+# script's arguments in settings.json instead of editing anything here. Writes
+# cost.total_cost_usd to .ruori/usage/<session_id> at the worktree root
+# (resolved from "cwd" with git, since "cwd" may be a subdirectory) —
+# the same directory ruori bind-mounts into this container, so the host
+# reads the same file. ruori sums every file in that directory.
+#
+# One file per session, overwritten in place: /clear starts a new
+# session_id (a new file), and resuming keeps the id and carries its
+# cost on, so the latest value per session is exact. A value is never
+# lowered, so nothing can shrink a recorded total. Prints the session
+# cost as the status line itself. Deliberately silent/non-blocking: any
+# failure just skips the write — it can never interfere with a session.
+set -uo pipefail
+
+USAGE_DIRNAME=".ruori/usage"
+
+payload="$(cat)"
+# One jq call; joined on the unit separator rather than a tab, since
+# `read` collapses runs of whitespace delimiters and an empty field
+# would shift the rest.
+fields="$(printf '%s' "$payload" | jq -r '[.session_id // "", (.cost.total_cost_usd // "" | tostring), .cwd // ""] | join("\u001f")' 2>/dev/null)" || fields=""
+IFS=$'\x1f' read -r session_id cost cwd <<<"$fields" || true
+
+record_usage() {
+  local root dir file old tmp
+  # session_id becomes a filename.
+  printf '%s' "$session_id" | grep -Eq '^[A-Za-z0-9_-]+$' || return 0
+  printf '%s' "$cost" | grep -Eq '^[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$' || return 0
+  [ -n "$cwd" ] && [ -d "$cwd" ] || return 0
+  root="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)" || return 0
+
+  dir="$root/$USAGE_DIRNAME"
+  file="$dir/$session_id"
+  if [ -f "$file" ]; then
+    old="$(head -n 1 "$file" 2>/dev/null)"
+    # Unchanged or lower: nothing to write. LC_ALL=C: awk parses numbers
+    # by locale, and a comma-decimal locale would read "1.5" as 1.
+    LC_ALL=C awk -v new="$cost" -v old="$old" 'BEGIN { exit !(new + 0 > old + 0) }' || return 0
+  fi
+  mkdir -p "$dir" 2>/dev/null || return 0
+  tmp="$(mktemp "$dir/.$session_id.XXXXXX" 2>/dev/null)" || return 0
+  printf '%s\n' "$cost" >"$tmp" 2>/dev/null && mv -f "$tmp" "$file" 2>/dev/null || rm -f "$tmp"
+}
+
+record_usage
+
+# Arguments, if any, are the image's previous status-line command: it
+# gets the same JSON on stdin and its output is shown instead of ours.
+# The usage file is written either way.
+if [ "$#" -gt 0 ]; then
+  printf '%s' "$payload" | "$@" 2>/dev/null
+else
+  LC_ALL=C awk -v c="${cost:-0}" 'BEGIN { printf "$%.2f\n", c + 0 }'
+fi
+exit 0

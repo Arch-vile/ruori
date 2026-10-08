@@ -89,25 +89,26 @@ change:
 6. **PR status / usage cost columns** — both follow the same
    cache-then-explicit-fetch split: `load_*_cache` is cheap and runs on
    every picker draw/reload; `fetch_*` is slow (network calls to `gh`,
-   or a full scan of `~/.claude/projects/*/*.jsonl`) and only runs from
+   or a scan of `~/.claude/projects/*/*.jsonl`) and only runs from
    the picker's Ctrl-F binding. Both persist through a file so state
    survives across the separate subprocesses fzf's `reload` spawns.
-7. **Claude Code status integration** — `.ruori/claude-status` and
-   `.ruori/agent-usage` are files an *external* agent hook writes under
-   one `.ruori/` subdirectory at a worktree's root (see
+   The one exception is container-mode `USAGE`, which `usage_cost_for`
+   reads live from `.ruori/usage/` with no fetch or cache (see 7).
+7. **Claude Code status integration** — `.ruori/claude-status` (written
+   by an *external* agent hook) and `.ruori/usage/<session_id>` (one
+   file per session, written by an external status-line script, see
+   `ruori-claude-usage-statusline` in `docs/new-repo-setup-guide.md`) live
+   under one `.ruori/` subdirectory at a worktree's root (see
    `docs/dashboard-columns.md`); `ruori` only reads them,
-   host/container-transparently, and never installs any hook itself on
-   the host. Container mode is the only way the `CLAUDE` column becomes
-   live, because hooks there are baked into the repo's own Dockerfile
-   via `ruori init` rather than the host's Claude Code config.
-   `.ruori/agent-usage` is optional, not required, alongside it:
-   `fetch_usage_costs` also scans any `<ruori-state-dir>/shared/*/projects`
-   it finds (populated by a repo sharing Claude Code's login via
-   `RUORI_SHARED_DIR` — see `docs/container-sandbox-guide.md`'s
-   "Recipe: Claude Code auth"), so a repo using that recipe can drop
-   the usage half of its hook and rely on the host-side scan instead;
-   `.ruori/claude-status` still needs the hook regardless, since status
-   is event-driven with no transcript equivalent.
+   host/container-transparently, and never installs any hook or status
+   line itself on the host. Container mode is the only way the `CLAUDE`
+   column becomes live, and the only way `USAGE` comes from
+   `.ruori/usage/`, because both are baked into the repo's own
+   Dockerfile via `ruori init` rather than the host's Claude Code
+   config. In container mode `USAGE` is the sum of those files and
+   `fetch_usage_costs` scans nothing; host mode keeps the
+   `~/.claude/projects` transcript scan. See `docs/gimmicks.md`'s
+   "Status and cost columns" for why the status line, not transcripts.
 8. **iTerm2 window lifecycle** (`open_iterm_window_for` and the
    `*_iterm_window_id`/`iterm_log_file` machinery) — tracks the one
    currently-open window so a switch replaces it instead of piling up

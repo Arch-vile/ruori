@@ -24,7 +24,7 @@
 # anywhere, so no rename-onto-a-leaf-symlink problem. (Verified: with
 # CLAUDE_CONFIG_DIR set, Claude Code ignores ~/.claude/settings.json
 # entirely, so this repo's baked-in hooks settings only take effect
-# once seeded into the shared dir below -- confirmed empirically, not
+# once merged into the shared dir below -- confirmed empirically, not
 # assumed.)
 #
 # CLAUDE_CONFIG_DIR has to be visible to whatever later runs `claude`
@@ -46,14 +46,29 @@ if [ -n "${RUORI_SHARED_DIR:-}" ]; then
   shared_claude_dir="$RUORI_SHARED_DIR/ruori-claude-home"
   mkdir -p "$shared_claude_dir"
 
-  # First container to ever start seeds the shared dir's settings.json
-  # from whatever this image bakes into ~/.claude/settings.json (the
-  # hooks config) -- no-clobber, so a later container never overwrites
-  # a login/history already in the shared dir. Delete the shared dir
-  # yourself to force a fresh reseed after changing the Dockerfile's
-  # baked-in settings.
-  if [ -e "$HOME/.claude/settings.json" ] && [ ! -e "$shared_claude_dir/settings.json" ]; then
-    cp "$HOME/.claude/settings.json" "$shared_claude_dir/settings.json"
+  # Every start merges the "hooks" and "statusLine" keys this image
+  # bakes into ~/.claude/settings.json into the shared dir's
+  # settings.json, so a Dockerfile change to either reaches a shared
+  # config that already exists (a one-time seed never would). Every
+  # other key in the shared file -- anything set from inside Claude Code
+  # -- is kept. Written via temp file + mv so a concurrently starting
+  # container never reads a half-written file.
+  baked="$HOME/.claude/settings.json"
+  shared="$shared_claude_dir/settings.json"
+  if [ -e "$baked" ]; then
+    if [ -e "$shared" ]; then
+      # Never fatal: a failed merge keeps the shared file as it was
+      # rather than stopping the container from starting.
+      if tmp="$(mktemp "$shared_claude_dir/.settings.json.XXXXXX")"; then
+        if jq -s '.[0] + (.[1] | {hooks, statusLine} | with_entries(select(.value != null)))' "$shared" "$baked" >"$tmp"; then
+          mv -f "$tmp" "$shared"
+        else
+          rm -f "$tmp"
+        fi
+      fi
+    else
+      cp "$baked" "$shared"
+    fi
   fi
 
   marker="export CLAUDE_CONFIG_DIR=\"$shared_claude_dir\""

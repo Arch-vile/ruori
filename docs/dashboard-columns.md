@@ -121,37 +121,46 @@ as a fresh process. Until you press Ctrl-F at least once, `PR` shows
 
 ## `USAGE` cost
 
-Each worktree's total Claude Code spend in USD — the same number
-`/usage` reports — summed across every Claude Code session that's ever
-run with that worktree as its working directory. It reads this
-straight out of Claude Code's own local transcripts
+Each worktree's total Claude Code spend in USD, summed across every
+Claude Code session that's ever run in that worktree, started at its
+root or in any subdirectory of it (e.g. `apps/api`). It's the same
+figure Claude Code itself shows as a session's cost: computed locally
+from token counts at list price, so on a Pro/Max subscription it's
+what the work *would* have cost on the API, not what you pay — still
+useful for seeing which worktree is burning the most. No network calls
+either way. Where the number comes from depends on the repo's mode.
+
+**Container mode** reads one small file per Claude Code session from
+`.ruori/usage/` at the worktree root: each is named after the session
+id and holds that session's running cost. They're written from inside
+the container by `ruori-claude-usage-statusline`, a script set as Claude
+Code's status line in the repo's own image (see
+`docs/new-repo-setup-guide.md`), which Claude Code re-runs every few
+seconds with the session's JSON — including `cost.total_cost_usd`.
+`ruori` just sums the files, live, on every picker draw and reload, so
+this column needs no Ctrl-F in container mode and never shows `?`: `-`
+means no session has written a file yet (or the image has no status
+line). The files sit on the bind-mounted worktree rather than in the
+container, so they survive `ruori rebuild`; `/clear` starts a new
+session (a new file) and resuming a session keeps updating its own
+file, so nothing is counted twice. Delete `.ruori/usage/` to reset a
+worktree's `USAGE` to zero.
+
+**Host mode** reads Claude Code's own local transcripts
 (`~/.claude/projects/<encoded-path>/*.jsonl`, one directory per project
-path), which already contain a running cost total per session; no
-network calls, no separate accounting setup. Same `?`/`-` distinction
-as `PR`: `?` means never fetched, `-` means fetched and genuinely $0 (no
-Claude Code session has ever run there).
-
-For a container-mode worktree, `~/.claude/projects` normally lives
-*inside* the container, invisible to the host — the `.ruori/agent-usage`
-file (see `docs/container-sandbox-plan.md`) exists to bridge that,
-written by a container-baked hook and read here with priority over the
-scan above. (The scan also covers any
-`<git-common-dir>/ruori/shared/*/projects` it finds, for a repo whose
-own image keeps Claude Code's config under `RUORI_SHARED_DIR`, but
-`docs/container-sandbox-guide.md`'s "Recipe: Claude Code auth" keeps
-each container's transcripts private, so with that recipe
-`.ruori/agent-usage` is the only source of a container-mode worktree's
-usage.)
-
-Like `PR`, this is *not* refreshed by Ctrl-R — computing it means
-scanning every Claude Code session transcript on the machine to find
-the ones that belong to this repo's worktrees, which gets slower as
-your overall Claude Code history grows regardless of how many
-worktrees this repo has. **Ctrl-F** refreshes `USAGE` too; it's cached
-on disk at `<git-common-dir>/ruori/usage-cost.cache` the same way `PR`'s
-cache works, keyed by worktree path (not branch, since the cost is tied
-to which directory the sessions ran in). Until you press Ctrl-F at
-least once, `USAGE` shows `?` for everything.
+path), which already contain a running cost total per session. Same
+`?`/`-` distinction as `PR`: `?` means never fetched, `-` means fetched
+and genuinely $0 (no Claude Code session has ever run there). Like
+`PR`, this is *not* refreshed by Ctrl-R — computing it means scanning
+Claude Code's session transcripts to find the ones that belong to this
+repo's worktrees, which gets slower as your overall Claude Code
+history grows. **Ctrl-F** refreshes `USAGE` too; it's cached on disk at
+`<git-common-dir>/ruori/usage-cost.cache` the same way `PR`'s cache
+works, keyed by worktree path (not branch, since the cost is tied to
+which directory the sessions ran in). Until you press Ctrl-F at least
+once, `USAGE` shows `?` for everything. Only `~/.claude/projects` is
+scanned, so sessions run with a different `CLAUDE_CONFIG_DIR` aren't
+counted.
 
 `ruori list` fetches both `PR` and `USAGE` fresh every time, since it's a
 one-shot command rather than a hot reload loop.
