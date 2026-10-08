@@ -1456,30 +1456,22 @@ require_patch_if_overlay_configured() {
 # Filename ruori-claude-status-hook (see docs/agent-hooks-setup-guide.md)
 # writes at the root of the worktree it's running in — the two sides
 # only need to agree on this name, not on any shared central location.
-# Lives under one .ruori/ subdirectory (alongside AGENT_USAGE_FILENAME
+# Lives under one .ruori/ subdirectory (alongside AGENT_USAGE_DIRNAME
 # below) rather than as a loose dotfile, so a single **global**
 # gitignore entry for the directory covers both — see the setup guide.
 CLAUDE_STATUS_FILENAME=".ruori/claude-status"
 
-# Same host/container-transparent trick as CLAUDE_STATUS_FILENAME above,
-# extended to carry usage data (see docs/container-sandbox-plan.md
-# section J): a two-line "<cost_usd>\n<epoch>\n" file at the worktree
-# root, written by whatever agent's own hook runs there — inside a
-# container in container mode, this bind-mounted path is the only
-# reliable way for the host-side USAGE column to see it, since
-# ~/.claude/projects lives inside the container's own filesystem and is
-# never live-mounted. Generic, agent-owned extension point: `ruori` reads
-# it without knowing (or caring) which agent wrote it.
-AGENT_USAGE_FILENAME=".ruori/agent-usage"
-
-# How stale an AGENT_USAGE_FILENAME reading can be before usage_cost_for
-# ignores it and falls back to the host-side jsonl scan instead — guards
-# against showing a frozen number from a long-abandoned container/hook
-# setup as if it were still live. 30 days, generous on purpose: this
-# file is only ever a stand-in for the host scan, not a replacement for
-# it, so a rare stale read just means one worktree briefly shows the
-# host-side value instead.
-AGENT_USAGE_STALE_SECS=$((30 * 24 * 60 * 60))
+# Directory, at the worktree root, holding one file per agent session:
+# the file is named after the session id and its first line is that
+# session's running cost in USD. In container mode it is the whole
+# source of the USAGE column: ruori-claude-statusline (see
+# docs/new-repo-setup-guide.md) writes it from Claude Code's status
+# line, inside the container, onto the bind-mounted worktree, so it
+# survives container rebuilds and needs no transcript reading. Each
+# session only ever overwrites its own file, so summing every file is
+# exact. Generic, agent-owned extension point: `ruori` reads it without
+# knowing (or caring) which agent wrote it.
+AGENT_USAGE_DIRNAME=".ruori/usage"
 
 # "busy"/"idle" from the most recent hook event for this worktree, or
 # "-" if the hook has never fired for it (not configured, or no Claude
@@ -1716,40 +1708,27 @@ load_usage_cost_cache() {
   done <"$cache_file"
 }
 
-# Scans every top-level Claude Code session transcript under both
-# ~/.claude/projects (host-mode worktrees) and, for a container-mode
-# repo that shares Claude Code's login via RUORI_SHARED_DIR (see
-# docs/container-sandbox-guide.md's "Recipe: Claude Code auth"), any
-# <ruori-state-dir>/shared/*/projects it finds too -- that immediate
-# subdirectory name (e.g. this repo's "ruori-claude-home") is a
-# per-repo Dockerfile/entrypoint convention, never ruori's to know, so
-# this globs for the *shape* (something directly under
-# RUORI_SHARED_DIR with its own projects/ folder) rather than a
-# specific name. Deliberately not */subagents/*.jsonl, nested under a
-# session: those never carry their own "cost-state" line, since their
-# cost is already rolled into the parent session's. Sums each matching
-# file's last "cost-state" line's totalCostUSD (that field is already
-# a running total for the session, so only the last one per file
-# counts) for files whose cwd is one of this repo's worktree paths or
-# anywhere under one -- a session started in apps/api belongs to its
-# worktree as much as one started at the root. Persists via save_usage_cost_cache. Silently skips a scan root
-# if `jq` is missing or it doesn't exist (e.g. Claude Code hooks were
-# never used, or this repo doesn't share auth this way) — best-effort
-# extra, like the PR column.
+# Host mode only (container mode reads AGENT_USAGE_DIRNAME instead):
+# scans the top-level Claude Code session transcripts under
+# ~/.claude/projects. Deliberately not */subagents/*.jsonl, nested
+# under a session: those never carry their own "cost-state" line, since
+# their cost is already rolled into the parent session's. Sums each
+# matching file's last "cost-state" line's totalCostUSD (that field is
+# already a running total for the session, so only the last one per
+# file counts) for files whose cwd is one of this repo's worktree paths
+# or anywhere under one -- a session started in apps/api belongs to its
+# worktree as much as one started at the root. Persists via
+# save_usage_cost_cache. Silently does nothing if `jq` is missing or
+# the directory doesn't exist — best-effort extra, like the PR column.
 fetch_usage_costs() {
   usage_cost_map=()
   usage_cost_ever_fetched=1
+  # Container mode reads AGENT_USAGE_DIRNAME live instead (see
+  # usage_cost_for); there is nothing to scan.
+  [ "$CONTAINER_MODE" = "1" ] && return 0
   command -v jq >/dev/null 2>&1 || { save_usage_cost_cache; return 0; }
 
-  local -a projects_dirs=("$HOME/.claude/projects")
-  local state_dir shared_projects_dir
-  state_dir="$(ruori_state_dir)" 2>/dev/null || state_dir=""
-  if [ -n "$state_dir" ]; then
-    for shared_projects_dir in "$state_dir/shared"/*/projects; do
-      [ -d "$shared_projects_dir" ] || continue
-      projects_dirs+=("$shared_projects_dir")
-    done
-  fi
+  local projects_dir="$HOME/.claude/projects"
 
   local p
 
@@ -1773,7 +1752,7 @@ fetch_usage_costs() {
     wanted_dir_names+=("$(printf '%s' "$p" | tr -c 'A-Za-z0-9' '-')")
   done
 
-  local projects_dir f cwd cost dir_name project_subdir worktree
+  local f cwd cost dir_name project_subdir worktree
 
   # Succeeds if $1 (a ~/.claude/projects subdirectory name) is one of
   # wanted_dir_names, or one of them followed by "-<subdir>".
@@ -1804,10 +1783,8 @@ fetch_usage_costs() {
 
   # Reads $1 (a session transcript jsonl file) and, if its recorded cwd
   # is in one of this repo's worktrees, adds its last cost-state total
-  # into that worktree's usage_cost_map entry. A local function (bash's
-  # dynamic scoping means it sees usage_cost_map from the enclosing call)
-  # so both scan shapes below — filtered and unfiltered — share one
-  # implementation.
+  # into that worktree's usage_cost_map entry. A local function: bash's
+  # dynamic scoping means it sees usage_cost_map from the enclosing call.
   scan_usage_cost_file() {
     local f="$1"
     log_file_read "$f"
@@ -1825,53 +1802,51 @@ fetch_usage_costs() {
     usage_cost_map["$worktree"]="$(printf '%s\n%s\n' "${usage_cost_map[$worktree]:-0}" "$cost" | jq -s 'add')"
   }
 
-  for projects_dir in "${projects_dirs[@]}"; do
-    [ -d "$projects_dir" ] || continue
-    if [ "$projects_dir" = "$HOME/.claude/projects" ]; then
-      # The directory-name pre-filter only applies here: a host-mode
-      # session's recorded cwd is always the host path it ran in --
-      # the worktree root (see activate_worktree's `tmux new-session -c
-      # "$target_path"`) or a subdirectory of it. A container-mode session's cwd is NOT
-      # guaranteed to equal the host worktree path it's bind-mounted at
-      # — e.g. a Dockerfile whose entrypoint runs Claude Code from a
-      # fixed WORKDIR instead of cd-ing into the mount — so applying
-      # this same shortcut to the RUORI_SHARED_DIR scan below would
-      # risk silently skipping real matches; that one still scans every
-      # file, same as before.
-      for project_subdir in "$projects_dir"/*/; do
-        [ -d "$project_subdir" ] || continue
-        dir_name="$(basename "$project_subdir")"
-        project_dir_name_wanted "$dir_name" || continue
-        for f in "$project_subdir"*.jsonl; do
-          [ -f "$f" ] || continue
-          scan_usage_cost_file "$f"
-        done
+  # A host-mode session's recorded cwd is always the host path it ran
+  # in -- the worktree root (see activate_worktree's `tmux new-session
+  # -c "$target_path"`) or a subdirectory of it -- so the directory-name
+  # pre-filter never skips a real match.
+  if [ -d "$projects_dir" ]; then
+    for project_subdir in "$projects_dir"/*/; do
+      [ -d "$project_subdir" ] || continue
+      dir_name="$(basename "$project_subdir")"
+      project_dir_name_wanted "$dir_name" || continue
+      for f in "$project_subdir"*.jsonl; do
+        [ -f "$f" ] || continue
+        scan_usage_cost_file "$f"
       done
-      continue
-    fi
-    for f in "$projects_dir"/*/*.jsonl; do
-      [ -f "$f" ] || continue
-      scan_usage_cost_file "$f"
     done
-  done
+  fi
 
   save_usage_cost_cache
 }
 
+# A worktree's USAGE cell. Container mode sums the per-session files
+# under AGENT_USAGE_DIRNAME live, on every call -- a handful of small
+# local files, the same cost class as claude_status_for's read -- so it
+# needs no Ctrl-F and never shows "?". Host mode shows whatever
+# fetch_usage_costs last cached.
 usage_cost_for() {
-  local path="$1" cost f agent_cost agent_epoch now
-  f="$path/$AGENT_USAGE_FILENAME"
-  if [ -f "$f" ]; then
-    log_file_read "$f"
-    agent_cost="$(sed -n '1p' "$f" 2>/dev/null)"
-    agent_epoch="$(sed -n '2p' "$f" 2>/dev/null)"
-    now="$(date +%s)"
-    case "$agent_epoch" in
-      ''|*[!0-9]*) agent_epoch="" ;;
-    esac
-    if [ -n "$agent_cost" ] && [ -n "$agent_epoch" ] && [ $((now - agent_epoch)) -lt "$AGENT_USAGE_STALE_SECS" ]; then
-      LC_NUMERIC=C printf '$%.2f' "$agent_cost" 2>/dev/null && return 0
+  local path="$1" cost dir
+
+  if [ "$CONTAINER_MODE" = "1" ]; then
+    dir="$path/$AGENT_USAGE_DIRNAME"
+    set -- "$dir"/*
+    if [ ! -e "$1" ]; then
+      printf '%s' '-'
+      return 0
     fi
+    log_file_read "$dir"
+    # First line of each file; anything non-numeric (a half-copied or
+    # foreign file) is skipped rather than breaking the sum. LC_ALL=C, not
+    # just LC_NUMERIC=C as for the printf below: awk parses numbers by
+    # locale too, and an LC_ALL of e.g. fi_FI.UTF-8 would override
+    # LC_NUMERIC and read "1.5" as 1.
+    LC_ALL=C awk '
+      FNR == 1 && $1 ~ /^[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$/ { sum += $1; n++ }
+      END { if (n) printf "$%.2f", sum; else printf "-" }
+    ' "$@" 2>/dev/null || true
+    return 0
   fi
 
   cost="${usage_cost_map["$path"]:-}"
@@ -2485,14 +2460,14 @@ case "$cmd" in
 
     resources_section "Book-keeping"
     resources_scope "Global"
-    resources_entry "$HOME/.claude/projects" "Not ruori's own file -- Claude Code's own session-transcript log, which Claude Code writes on its own with no setup. Nothing to manage yourself. ruori only reads it, to total up USAGE for a worktree whose Claude Code runs directly on the host (not in a container); it's updated continuously by Claude Code itself while a session runs there. For a worktree in container mode this path is irrelevant -- its own transcripts live inside the container instead, unless this repo shares Claude Code's login via RUORI_SHARED_DIR (see docs/container-sandbox-guide.md's 'Recipe: Claude Code auth'), in which case ruori also scans <ruori-state-dir>/shared/*/projects the same way; otherwise see .ruori/agent-usage under Worktree below."
+    resources_entry "$HOME/.claude/projects" "Not ruori's own file -- Claude Code's own session-transcript log, which Claude Code writes on its own with no setup. Nothing to manage yourself. ruori only reads it, and only in host mode, to total up USAGE for a worktree whose Claude Code runs directly on the host; it's updated continuously by Claude Code itself while a session runs there. In container mode ruori never reads it -- USAGE comes from .ruori/usage under Worktree below instead."
     resources_scope "Repository"
     resources_entry "$common_dir/ruori" "Everything ruori itself keeps for this repo lives under this one directory -- delete it any time ('rm -rf') to reset all local ruori state for this repo in one shot; every entry below is a file or subdirectory inside it. ruori recreates whatever it needs (this directory included) on its next invocation."
     resources_entry "$common_dir/ruori/current-worktree" "Internal to ruori, no need to open it. Remembers which worktree you last switched to, so the picker's * marker survives across separate 'ruori' runs. Written by ruori itself on every switch; read once on startup."
     resources_entry "$common_dir/ruori/host-mode-ack" "Internal to ruori, safe to delete to bring the blocking nudge back. Marks that you've acknowledged (via 'ruori --host-mode-fine') that host mode is fine for this repo, downgrading the 'container mode is OFF' prompt before the manager loop starts to a one-line reminder printed every run instead of something you press Enter past. Only relevant when container mode isn't on for this repo; written once by that flag, checked on every 'switch'/'new'."
     resources_entry "$common_dir/ruori/activation-times" "Internal to ruori, safe to delete. One line per worktree with the epoch time it was last activated, used only to sort the picker/list so your most recently used worktree sorts first. Rewritten by ruori every time you switch to a worktree."
     resources_entry "$common_dir/ruori/pr-status.cache" "Internal to ruori; delete it any time to force a re-fetch. Caches each branch's GitHub PR status so the picker doesn't call 'gh' on every reload. Written only by a Ctrl-F fetch in the picker, or by 'ruori list'/'ruori details' (which always fetch fresh); read on every other picker reload."
-    resources_entry "$common_dir/ruori/usage-cost.cache" "Internal to ruori; delete it any time to force a re-fetch. Caches each worktree's total Claude Code spend (sourced from ~/.claude/projects, RUORI_SHARED_DIR, or .ruori/agent-usage -- see both above/below) so the picker doesn't rescan your whole Claude Code history on every reload. Written by the same Ctrl-F / 'list' / 'details' fetches as the PR cache above."
+    resources_entry "$common_dir/ruori/usage-cost.cache" "Internal to ruori; delete it any time to force a re-fetch. Host mode only: caches each worktree's total Claude Code spend, scanned from ~/.claude/projects (see above), so the picker doesn't rescan your whole Claude Code history on every reload. Written by the same Ctrl-F / 'list' / 'details' fetches as the PR cache above. Container mode doesn't use it -- it reads .ruori/usage live instead."
     resources_entry "$common_dir/ruori/ports" "Internal to ruori; only matters in container mode. A worktree's host port is only seeded by a hash of it -- ruori then scans forward from that seed for the first port that's actually free, so the final pick depends on ambient state (what else is running) at that moment, not the hash alone. Docker bakes that exact port into the container permanently at creation and won't let it change without recreating the container, so ruori has to remember what it picked here rather than recomputing it later and risking a different answer. Written when a container-mode worktree's container first starts; its entries are dropped when that worktree is removed ('ruori rm')."
     resources_entry "$common_dir/ruori/iterm.log" "Debug-only -- you don't need to read this unless an iTerm2 window is misbehaving (see docs/troubleshooting.md). An append-only log of the manager loop's own iTerm2 window open/close lifecycle. Written continuously by ruori for as long as the manager loop ('ruori' with no args) keeps running."
     resources_entry "$common_dir/ruori/file-io.log" "Debug-only -- for troubleshooting/transparency (see docs/troubleshooting.md). An append-only log of every read/write ruori's own script code performs against a file (state/cache files, $CONFIG_FILENAME, worktree copy-in, generated files) -- not file access done inside a child process it shells out to (git, docker, code, fzf, osascript), which isn't observable here. Written by every ruori command that touches a file, including read-only ones like 'list'."
@@ -2502,9 +2477,9 @@ case "$cmd" in
     resources_entry "$common_dir/ruori/readme.md" "Not read back by ruori -- a plain copy of ruori's own README.md, written by 'ruori init' alongside the docs/ copy below for you to hand to a coding agent (any agent; it's just a file, not a Claude Code skill). Safe to delete once an agent has read it; re-run 'ruori init' any time for a fresh copy."
     resources_entry "$common_dir/ruori/docs" "Not read back by ruori -- a plain copy of every file in ruori's own docs/ directory (the tool's docs, not this repo's), written by 'ruori init' so an agent has everything new-repo-setup-guide.md (the file to actually follow) links out to, without a second, agent-only copy of any of it. Safe to delete once an agent has acted on it; re-run 'ruori init' any time for a fresh copy."
     resources_scope "Worktree"
-    resources_entry "$worktree_path/.ruori" "Everything an external agent hook writes at this worktree's root lives under this one directory -- not written by ruori itself, but ruori only ever reads the two well-known files below from it. Needs a **global** gitignore entry (not a per-repo one), or 'git worktree remove' will refuse to remove this worktree."
+    resources_entry "$worktree_path/.ruori" "Everything an external agent hook or status line writes at this worktree's root lives under this one directory -- not written by ruori itself, but ruori only ever reads the well-known entries below from it. Needs a **global** gitignore entry (not a per-repo one), or 'git worktree remove' will refuse to remove this worktree."
     resources_entry "$worktree_path/$CLAUDE_STATUS_FILENAME" "You don't write this, but it's worth knowing about: it's what makes the picker's CLAUDE (busy/waiting/idle) column work for this worktree. Written by Claude Code's own hooks -- baked into this repo's container image following the guide 'ruori init' copies out, never by ruori itself -- every time Claude's status changes. Only present/updated if this worktree runs in container mode."
-    resources_entry "$worktree_path/$AGENT_USAGE_FILENAME" "Same story as the status file above: not written by ruori, and takes priority over the host-side scan when present and fresh (see Global above) -- the working source of the USAGE number for a worktree running in a container that does NOT share Claude Code's login via RUORI_SHARED_DIR (its own ~/.claude/projects isn't visible to the host otherwise). Written by that same container-baked Claude Code hook each time Claude goes idle, as a running total, if that hook computes one -- this repo's own hook doesn't (see docs/container-sandbox-guide.md's 'Recipe: Claude Code auth'), relying on the host-side scan instead."
+    resources_entry "$worktree_path/$AGENT_USAGE_DIRNAME" "Same story as the status file above: not written by ruori. Container mode only -- the whole source of the USAGE column there, read live on every picker redraw with no Ctrl-F needed. One file per Claude Code session, named after its session id, holding that session's running cost; written by the container's ruori-claude-statusline (Claude Code's status line, see docs/new-repo-setup-guide.md) every few seconds while the session runs. Files from finished sessions stay and keep counting; delete the directory to reset this worktree's USAGE to zero."
 
     resources_section "Configuration"
     resources_scope "Global"

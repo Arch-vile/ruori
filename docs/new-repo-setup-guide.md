@@ -237,7 +237,7 @@ mode at all:
 
 The Dockerfile itself needs: `git`, `tmux`, and `jq` installed (`git`
 and `tmux` for `ruori` to attach a session inside the container at all;
-`jq` for the status hook below), the project's runtime, and — if the
+`jq` for the status hook and status line below), the project's runtime, and — if the
 user wants something to auto-start (an agent, the dev server) —
 either the image's own `CMD`/`ENTRYPOINT` or a tmux `default-command`
 baked into a `~/.tmux.conf`. Add `socat` too if you proposed any
@@ -254,39 +254,49 @@ RUN echo 'set -g default-command "<command>"' >> /root/.tmux.conf
 WORKDIR /workspace
 ```
 
-### Claude Code status hook — bake it into the image, always
+### Claude Code status hook and status line — bake them into the image, always
 
 If the user's agent is Claude Code (ask if unclear), the Dockerfile
-must also install the same busy/waiting/idle + usage-cost status hook
-`ruori`'s picker relies on for its `CLAUDE`/`USAGE` columns — **entirely
-inside the image**. This is not optional and not a separate setup
-step done later: without it those two columns just always show `-`
-for this repo's worktrees, silently, with no error. And it must never
-touch anything on the **host** — no host `~/.claude`, no host
-gitignore, nothing outside this Dockerfile and the files it `COPY`s
-in. That's the whole point of doing it this way: the hook lives only
-inside the container this same Dockerfile builds, gets rebuilt fresh
-with every image build, and never leaks into the developer's own
-Claude Code config on their machine.
+must also install the busy/waiting/idle status hook and the usage
+status line that `ruori`'s picker relies on for its `CLAUDE`/`USAGE`
+columns — **entirely inside the image**. This is not optional and not
+a separate setup step done later: without them those two columns just
+always show `-` for this repo's worktrees, silently, with no error.
+And it must never touch anything on the **host** — no host
+`~/.claude`, no host gitignore, nothing outside this Dockerfile and the
+files it `COPY`s in. That's the whole point of doing it this way: both
+live only inside the container this same Dockerfile builds, get
+rebuilt fresh with every image build, and never leak into the
+developer's own Claude Code config on their machine.
 
-How it works: seven Claude Code hook events (`UserPromptSubmit`,
-`PreToolUse`, `PostToolUse`, `PermissionRequest`, `Elicitation`,
-`ElicitationResult`, `Stop`) all invoke one script with a status
-argument, which writes `busy`/`waiting`/`idle` to `.ruori/claude-status`
-at the worktree root, and (on `idle`) a running cost total to
-`.ruori/agent-usage` there too — both under one `.ruori/` subdirectory
-(the script creates it), not as loose dotfiles, so a single gitignore
-entry covers both. `ruori` already bind-mounts the worktree root into
-the container (see above), so a file written there from inside the
-container is the exact same file `ruori` reads from the host — no
-extra plumbing needed, and that directory is already covered by the
+How it works:
+
+- **Status (`CLAUDE` column):** seven Claude Code hook events
+  (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PermissionRequest`,
+  `Elicitation`, `ElicitationResult`, `Stop`) all invoke one script with
+  a status argument, which writes `busy`/`waiting`/`idle` to
+  `.ruori/claude-status` at the worktree root.
+- **Usage (`USAGE` column):** Claude Code's status line runs a second
+  script every few seconds with the session's JSON on stdin. It writes
+  that session's running cost (`cost.total_cost_usd`) to
+  `.ruori/usage/<session_id>` at the worktree root, one file per
+  session, and `ruori` sums the files. No transcript is ever read.
+
+Both scripts resolve the worktree root with `git rev-parse
+--show-toplevel`, since Claude Code's `cwd` may be a subdirectory, and
+both write under one `.ruori/` subdirectory (created on demand), not as
+loose dotfiles, so a single gitignore entry covers everything. `ruori`
+already bind-mounts the worktree root into the container (see above),
+so a file written there from inside the container is the exact same
+file `ruori` reads from the host — no extra plumbing needed, and it
+survives container rebuilds. That directory is already covered by the
 end user's **global** gitignore if they've used `ruori` in container mode
 before (if this is their first container-mode repo, mention it: they
 should add `.ruori/` to their global `git config --global
 core.excludesFile` once, otherwise `git worktree remove` will refuse to
 remove a worktree it's sitting in).
 
-Write these two files next to the Dockerfile (e.g. in `.devcontainer/`
+Write these three files next to the Dockerfile (e.g. in `.devcontainer/`
 alongside it), then `COPY` them in:
 
 `.devcontainer/ruori-claude-status-hook`:
@@ -294,25 +304,26 @@ alongside it), then `COPY` them in:
 ```bash
 #!/usr/bin/env bash
 # ruori-claude-status-hook - records Claude Code's busy/waiting/idle status
-# (and, on "idle", a running usage-cost total) for the current worktree,
-# so ruori's picker can show it. Invoked as a Claude Code hook with one of
-# three status arguments: busy, waiting, idle. Reads the hook's JSON
-# payload from stdin (needs "cwd") and writes to two fixed filenames at
-# the worktree root — resolved from "cwd" with git, since "cwd" is
-# Claude Code's *current* directory and may be a subdirectory (e.g.
-# apps/api) — the same directory ruori bind-mounts into this container,
-# so the host sees the same files with no extra plumbing. Deliberately
-# silent/non-blocking: any failure (bad payload, no cwd, not inside a
-# git worktree, unwritable worktree) just exits 0 without writing
-# anything, so this can never interfere with a normal Claude Code
-# session.
+# for the current worktree, so ruori's picker can show it. Invoked as a
+# Claude Code hook with one of three status arguments: busy, waiting,
+# idle. Reads the hook's JSON payload from stdin (needs "cwd") and
+# writes a fixed filename at the worktree root — resolved from "cwd"
+# with git, since "cwd" is Claude Code's *current* directory and may be
+# a subdirectory — the same directory ruori bind-mounts into this
+# container, so the host sees the same file with no extra plumbing.
+# Deliberately silent/non-blocking: any failure (bad payload, no cwd,
+# not inside a git worktree, unwritable worktree) just exits 0 without
+# writing anything, so this can never interfere with a normal Claude
+# Code session.
+#
+# Status only: the USAGE column comes from ruori-claude-statusline
+# instead (see docs/new-repo-setup-guide.md).
 set -euo pipefail
 
-# Both live under one .ruori/ subdirectory rather than as loose
-# dotfiles, so a single global gitignore entry for the directory (not
-# either specific filename) is enough.
+# Lives under one .ruori/ subdirectory rather than as a loose dotfile,
+# so a single **global** gitignore entry for the directory (not this
+# specific filename) is enough -- see docs/new-repo-setup-guide.md.
 STATUS_FILENAME=".ruori/claude-status"
-AGENT_USAGE_FILENAME=".ruori/agent-usage"
 
 status="${1:-}"
 case "$status" in
@@ -328,30 +339,79 @@ cwd="$(printf '%s' "$payload" | jq -r '.cwd // empty' 2>/dev/null || true)"
 
 [ -n "$cwd" ] && [ -d "$cwd" ] || exit 0
 # "cwd" follows Claude Code into subdirectories (a session launched in,
-# or cd'd into, apps/api reports apps/api), but ruori only reads these
-# files at the worktree root.
+# or cd'd into, apps/api reports apps/api), but ruori only reads this
+# file at the worktree root.
 root="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)" || exit 0
 
 mkdir -p "$root/.ruori" 2>/dev/null || exit 0
 printf '%s\n%s\n' "$status" "$(date +%s)" >"$root/$STATUS_FILENAME" 2>/dev/null || true
 
-if [ "$status" = "idle" ]; then
-  projects_dir="$HOME/.claude/projects"
-  total="0"
-  if [ -d "$projects_dir" ]; then
-    for f in "$projects_dir"/*/*.jsonl; do
-      [ -f "$f" ] || continue
-      file_cwd="$(grep -m1 '"cwd":"' "$f" 2>/dev/null | jq -r '.cwd // empty' 2>/dev/null)" || true
-      # A session started anywhere in this worktree counts, not just at its root.
-      case "$file_cwd" in "$root" | "$root"/*) ;; *) continue ;; esac
-      file_cost="$(grep '"type":"cost-state"' "$f" 2>/dev/null | tail -1 | jq -r '.totalCostUSD // empty' 2>/dev/null)" || true
-      [ -n "$file_cost" ] || continue
-      total="$(printf '%s\n%s\n' "$total" "$file_cost" | jq -s 'add')"
-    done
-  fi
-  printf '%s\n%s\n' "$total" "$(date +%s)" >"$root/$AGENT_USAGE_FILENAME" 2>/dev/null || true
-fi
+exit 0
+```
 
+`.devcontainer/ruori-claude-statusline`:
+
+```bash
+#!/usr/bin/env bash
+# ruori-claude-statusline - records this Claude Code session's running
+# cost for ruori's USAGE column. Configured as Claude Code's statusLine
+# command (with "refreshInterval": 5), so Claude Code runs it every few
+# seconds with the session's JSON on stdin. Writes
+# cost.total_cost_usd to .ruori/usage/<session_id> at the worktree root
+# (resolved from "cwd" with git, since "cwd" may be a subdirectory) —
+# the same directory ruori bind-mounts into this container, so the host
+# reads the same file. ruori sums every file in that directory.
+#
+# One file per session, overwritten in place: /clear starts a new
+# session_id (a new file), and resuming keeps the id and carries its
+# cost on, so the latest value per session is exact. A value is never
+# lowered, so nothing can shrink a recorded total. Prints the session
+# cost as the status line itself. Deliberately silent/non-blocking: any
+# failure just skips the write — it can never interfere with a session.
+set -uo pipefail
+
+USAGE_DIRNAME=".ruori/usage"
+
+# Optional: a status-line command this image had before. It gets the
+# same JSON on stdin and its output is shown instead of ours; the usage
+# file is written either way.
+STATUSLINE_CHAIN=""
+
+payload="$(cat)"
+# One jq call; joined on the unit separator rather than a tab, since
+# `read` collapses runs of whitespace delimiters and an empty field
+# would shift the rest.
+fields="$(printf '%s' "$payload" | jq -r '[.session_id // "", (.cost.total_cost_usd // "" | tostring), .cwd // ""] | join("\u001f")' 2>/dev/null)" || fields=""
+IFS=$'\x1f' read -r session_id cost cwd <<<"$fields" || true
+
+record_usage() {
+  local root dir file old tmp
+  # session_id becomes a filename.
+  printf '%s' "$session_id" | grep -Eq '^[A-Za-z0-9_-]+$' || return 0
+  printf '%s' "$cost" | grep -Eq '^[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$' || return 0
+  [ -n "$cwd" ] && [ -d "$cwd" ] || return 0
+  root="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)" || return 0
+
+  dir="$root/$USAGE_DIRNAME"
+  file="$dir/$session_id"
+  if [ -f "$file" ]; then
+    old="$(head -n 1 "$file" 2>/dev/null)"
+    # Unchanged or lower: nothing to write. LC_ALL=C: awk parses numbers
+    # by locale, and a comma-decimal locale would read "1.5" as 1.
+    LC_ALL=C awk -v new="$cost" -v old="$old" 'BEGIN { exit !(new + 0 > old + 0) }' || return 0
+  fi
+  mkdir -p "$dir" 2>/dev/null || return 0
+  tmp="$(mktemp "$dir/.$session_id.XXXXXX" 2>/dev/null)" || return 0
+  printf '%s\n' "$cost" >"$tmp" 2>/dev/null && mv -f "$tmp" "$file" 2>/dev/null || rm -f "$tmp"
+}
+
+record_usage
+
+if [ -n "$STATUSLINE_CHAIN" ]; then
+  printf '%s' "$payload" | bash -c "$STATUSLINE_CHAIN" 2>/dev/null
+else
+  LC_ALL=C awk -v c="${cost:-0}" 'BEGIN { printf "$%.2f\n", c + 0 }'
+fi
 exit 0
 ```
 
@@ -359,13 +419,17 @@ exit 0
 image already needs its own `~/.claude/settings.json` for something
 else (e.g. `container-copy`'d credentials write to a different file);
 otherwise this file's contents become that settings file verbatim.
-Each event needs a short `timeout` so a stuck hook fails fast instead
-of stalling a session; `UserPromptSubmit`/`Stop` don't take a
+Each hook event needs a short `timeout` so a stuck hook fails fast
+instead of stalling a session; `UserPromptSubmit`/`Stop` don't take a
 `matcher` field at all, and the rest omit it too since we want it to
-match everything:
+match everything. `refreshInterval` on the status line is required, not
+cosmetic: without it the status line only re-runs on events such as a
+new reply, and spend from the background requests Claude Code makes
+after a reply never reaches the file:
 
 ```json
 {
+  "statusLine": { "type": "command", "command": "ruori-claude-statusline", "refreshInterval": 5 },
   "hooks": {
     "UserPromptSubmit": [
       { "hooks": [{ "type": "command", "command": "ruori-claude-status-hook busy", "timeout": 5 }] }
@@ -397,11 +461,37 @@ Then, in the Dockerfile, after `git`/`tmux`/`jq` are installed:
 ```dockerfile
 COPY .devcontainer/ruori-claude-status-hook /usr/local/bin/ruori-claude-status-hook
 RUN chmod +x /usr/local/bin/ruori-claude-status-hook
+COPY .devcontainer/ruori-claude-statusline /usr/local/bin/ruori-claude-statusline
+RUN chmod +x /usr/local/bin/ruori-claude-statusline
 # $HOME here must match whichever user actually runs Claude Code in
 # this image — /root unless a Dockerfile USER directive says otherwise;
 # copy to both homes if you're not sure which one applies.
 COPY .devcontainer/claude-settings.json /root/.claude/settings.json
 ```
+
+**Check these three things before presenting the plan** — each one
+silently breaks the `USAGE` column if missed:
+
+- **An existing status line.** Claude Code has exactly one. If the
+  image (or an existing `claude-settings.json`) already sets a
+  `statusLine` command, don't replace it: keep ours as the
+  `statusLine`, and put the old command in the script's
+  `STATUSLINE_CHAIN` variable, so its output is still what the user
+  sees.
+- **A committed project-level `statusLine`.** A `statusLine` in the
+  repo's own `.claude/settings.json` or `.claude/settings.local.json`
+  takes precedence over the user-level settings baked in here, so ours
+  would never run. If one exists, tell the user plainly; the fix is
+  theirs to choose (move it into `STATUSLINE_CHAIN` instead, or accept
+  that `USAGE` stays `-`).
+- **`CLAUDE_CONFIG_DIR`.** If the image or its entrypoint sets
+  `CLAUDE_CONFIG_DIR`, Claude Code ignores `~/.claude/settings.json`
+  entirely, so both the hooks and the status line must end up in
+  `$CLAUDE_CONFIG_DIR/settings.json` instead. If that directory is
+  persistent or shared rather than baked, write it from the entrypoint
+  on every start (merging the `hooks` and `statusLine` keys, keeping
+  the rest), not as a one-time seed — otherwise a later Dockerfile
+  change never reaches it.
 
 **Important — `COPY` source paths are relative to the build context,
 not to the Dockerfile's own directory.** `ruori` always runs `docker
@@ -441,8 +531,8 @@ user:
   and the full contents of the Dockerfile you're proposing to write
   (or, if one already exists at the target path, whether you're
   reusing it as-is or changing it, and why) — including the Claude Code
-  status hook files from the Dockerfile section above, if the agent is
-  Claude Code.
+  status hook and status line files from the Dockerfile section above,
+  if the agent is Claude Code, and the outcome of its three checks.
 - If you determined this repo can't reasonably be containerized, say
   so here explicitly, with your reasoning, instead of silently leaving
   the container directives out.
@@ -465,8 +555,9 @@ Only after the user confirms:
 2. Write the confirmed Dockerfile at the confirmed path (default
    `.devcontainer/Dockerfile`, relative to the main worktree root),
    unless the plan reused an existing one unchanged.
-3. Write `ruori-claude-status-hook` and `claude-settings.json` next to it
-   (if the agent is Claude Code), per the Dockerfile section above.
+3. Write `ruori-claude-status-hook`, `ruori-claude-statusline` and
+   `claude-settings.json` next to it (if the agent is Claude Code), per
+   the Dockerfile section above.
 
 Don't run, build, or test anything — this guide's job ends at writing
 these files.

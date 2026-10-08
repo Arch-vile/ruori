@@ -3,22 +3,17 @@
 # for the current worktree, so ruori's picker can show it. Invoked as a
 # Claude Code hook with one of three status arguments: busy, waiting,
 # idle. Reads the hook's JSON payload from stdin (needs "cwd") and
-# writes a fixed filename at the worktree root ("$cwd" — the same
-# directory ruori bind-mounts into this container, so the host sees the
-# same file with no extra plumbing). Deliberately silent/non-blocking:
-# any failure (bad payload, no cwd, unwritable worktree) just exits 0
-# without writing anything, so this can never interfere with a normal
-# Claude Code session.
+# writes a fixed filename at the worktree root — resolved from "cwd"
+# with git, since "cwd" is Claude Code's *current* directory and may be
+# a subdirectory — the same directory ruori bind-mounts into this
+# container, so the host sees the same file with no extra plumbing.
+# Deliberately silent/non-blocking: any failure (bad payload, no cwd,
+# not inside a git worktree, unwritable worktree) just exits 0 without
+# writing anything, so this can never interfere with a normal Claude
+# Code session.
 #
-# Doesn't compute a usage-cost total (older versions of this hook did,
-# writing .ruori/agent-usage on "idle") -- this repo shares Claude
-# Code's login live across every worktree's container via
-# RUORI_SHARED_DIR (see docs/container-sandbox-guide.md's "Recipe:
-# Claude Code auth"), which makes session transcripts host-visible
-# under RUORI_SHARED_DIR's own <something>/projects. ruori's own USAGE
-# column reads that directly now, the same way it already does for
-# host-mode worktrees, so this hook doesn't need to compute or hand off
-# a total at all.
+# Status only: the USAGE column comes from ruori-claude-statusline
+# instead (see docs/new-repo-setup-guide.md).
 set -euo pipefail
 
 # Lives under one .ruori/ subdirectory rather than as a loose dotfile,
@@ -39,8 +34,12 @@ payload="$(cat)"
 cwd="$(printf '%s' "$payload" | jq -r '.cwd // empty' 2>/dev/null || true)"
 
 [ -n "$cwd" ] && [ -d "$cwd" ] || exit 0
+# "cwd" follows Claude Code into subdirectories (a session launched in,
+# or cd'd into, apps/api reports apps/api), but ruori only reads this
+# file at the worktree root.
+root="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)" || exit 0
 
-mkdir -p "$cwd/.ruori" 2>/dev/null || exit 0
-printf '%s\n%s\n' "$status" "$(date +%s)" >"$cwd/$STATUS_FILENAME" 2>/dev/null || true
+mkdir -p "$root/.ruori" 2>/dev/null || exit 0
+printf '%s\n%s\n' "$status" "$(date +%s)" >"$root/$STATUS_FILENAME" 2>/dev/null || true
 
 exit 0

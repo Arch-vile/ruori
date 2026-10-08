@@ -555,10 +555,13 @@ and claude.ai connectors and Remote Control don't work. Copying a real
 login avoids all of that.
 
 **The `USAGE` column.** Session transcripts stay inside each container,
-invisible to the host, so `ruori`'s `USAGE` column only shows a
-container-mode worktree's spend if your container-baked status hook
-also writes a running total to `.ruori/agent-usage` (see
-`docs/dashboard-columns.md`).
+invisible to the host, and `ruori` doesn't read them anyway: a
+container-mode worktree's `USAGE` comes from the per-session files
+`ruori-claude-statusline` writes to `.ruori/usage/` (see
+`docs/new-repo-setup-guide.md` and `docs/dashboard-columns.md`), so it
+works the same with this recipe as without it. Copying only the two
+login files leaves the image's baked-in `~/.claude/settings.json` (and
+its `statusLine`) in effect.
 
 ## Recipe: GitHub CLI (`gh`) auth
 
