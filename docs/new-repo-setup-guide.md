@@ -2,7 +2,7 @@
 
 Follow this to create the config `ruori` (a
 git-worktree context switcher) needs for **this repo** —
-`.ruori.conf` *and* a `.devcontainer/Dockerfile` (plus two
+`.ruori.conf` *and* a `.devcontainer/Dockerfile` (plus three
 small files the Dockerfile copies in, see step 3). All of this is part
 of the same one-off setup: `ruori`'s whole point is to run a coding agent
 and its dev server inside a container, confined to just the worktree
@@ -34,6 +34,19 @@ here.
   hardware/GUI access), say so explicitly and explain why, rather than
   quietly skipping it or asking "do you want this?" as if it were a
   nice-to-have.
+
+## Already set up? Updating an existing repo
+
+If this repo already has a `.ruori.conf` and a devcontainer, don't
+start over. Treat this guide as the description of what a current
+setup looks like: go through each step, compare what the repo has
+against what the step would produce, and propose only the differences
+— keeping every repo-specific choice that still fits. If the existing
+setup contains something this guide no longer describes, point it out
+in the plan rather than silently removing it. Then present the plan
+(step 4) and write it (step 5) as usual, and tell the user if a
+change is baked into the image, since each worktree's container then
+needs `ruori rebuild <branch>` before it takes effect.
 
 ## Step 1 — find the main worktree root
 
