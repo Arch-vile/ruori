@@ -81,7 +81,13 @@ Keybindings:
   with that same row's detail (branch, tmux/Docker state, Claude
   status, PR, usage, path, session) shown in a preview pane underneath
   it, same as the picker's own preview. Items: **switch to** (first, so
-  it stays the fast path — see above), **delete worktree** (see
+  it stays the fast path — see above; if the worktree has been `git
+  switch`ed off its own branch — the main checkout on anything but the
+  default branch, or a ruori-made worktree on a branch other than the
+  one its directory is named after — it first offers to move that
+  branch into its own worktree, switching the original back, and opens
+  the new worktree instead; declining opens the worktree as picked, and
+  uncommitted changes refuse the move), **delete worktree** (see
   "Deleting a worktree" below), **open host terminal** (see "`ruori
   terminal [branch-or-session]`" below), **open in browser** (container
   mode only, and only when this worktree has at least one `:http`-typed

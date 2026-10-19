@@ -2243,6 +2243,96 @@ branches_without_worktree() {
   done < <(git -C "$repo_root" remote)
 }
 
+# The repo's default branch: the remote's HEAD (origin first, then any
+# other remote), else init.defaultBranch, else whichever of main/master
+# exists locally. Prints nothing if none of those resolve.
+default_branch() {
+  local remote ref b
+  for remote in origin $(git -C "$repo_root" remote); do
+    ref="$(git -C "$repo_root" symbolic-ref --quiet --short "refs/remotes/$remote/HEAD" 2>/dev/null)" || continue
+    printf '%s\n' "${ref#"$remote"/}"
+    return 0
+  done
+  b="$(git -C "$repo_root" config --get init.defaultBranch 2>/dev/null)" || b=""
+  if [ -n "$b" ] && git -C "$repo_root" show-ref --verify --quiet "refs/heads/$b"; then
+    printf '%s\n' "$b"
+    return 0
+  fi
+  for b in main master; do
+    if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$b"; then
+      printf '%s\n' "$b"
+      return 0
+    fi
+  done
+}
+
+# The branch worktree $1 "belongs" to, or nothing if that can't be told:
+# the default branch for the main worktree, and for a linked worktree the
+# one local branch whose flattened name (create_worktree_for_branch's
+# '/'->'-') equals the directory name — so only for worktrees laid out the
+# way ruori creates them.
+home_branch_for() {
+  local path="$1" dir b match=""
+  if [ "$path" = "$main_worktree_path" ]; then
+    default_branch
+    return 0
+  fi
+  dir="$(basename "$path")"
+  while IFS= read -r b; do
+    [ "$(printf '%s' "$b" | tr '/' '-')" = "$dir" ] || continue
+    [ -n "$match" ] && return 0
+    match="$b"
+  done < <(git -C "$repo_root" for-each-ref --format='%(refname:short)' refs/heads)
+  [ -n "$match" ] && printf '%s\n' "$match"
+  return 0
+}
+
+# Picking a worktree that has been `git switch`ed off its own branch (most
+# often the main checkout sitting on a feature branch) would otherwise open
+# that branch in the wrong directory — the branch shows up in the picker
+# like any other, but it has no worktree of its own. Offers to move it into
+# one: switches worktree $1 back to its home branch (refused if the tree
+# has uncommitted changes, which would otherwise come along or block the
+# switch) and creates a worktree for branch $2. Returns 0 and sets
+# $created_worktree_path when the branch was moved; returns 1 when the
+# caller should activate $1 as picked (no mismatch, or the user declined);
+# returns 2 when it should do nothing at all (aborted or failed).
+offer_move_branch_to_worktree() {
+  local path="$1" branch="$2" home confirm
+  case "$branch" in
+    \(*) return 1 ;; # detached HEAD
+  esac
+  home="$(home_branch_for "$path")"
+  if [ -z "$home" ] || [ "$home" = "$branch" ]; then
+    return 1
+  fi
+
+  echo "ruori: '$branch' is checked out in $path, which belongs to '$home' -- it has no worktree of its own."
+  read -r -p "Move '$branch' into its own worktree (switches $path back to '$home')? [Y/n] " confirm
+  case "$confirm" in
+    n|N|no|NO) return 1 ;;
+  esac
+
+  if [ -n "$(git -C "$path" status --porcelain 2>/dev/null)" ]; then
+    echo "ruori: $path has uncommitted changes; commit or stash them first, then pick it again" >&2
+    read -r -p "Press enter to continue" _ || true
+    return 2
+  fi
+  if ! git -C "$path" switch "$home"; then
+    read -r -p "Press enter to continue" _ || true
+    return 2
+  fi
+  # $path no longer has $branch checked out, so drop it from the arrays
+  # before create_worktree_for_branch's "already has a worktree" check.
+  parse_worktrees
+  created_worktree_path=""
+  if ! create_worktree_for_branch "$branch" ""; then
+    read -r -p "Press enter to continue" _ || true
+    return 2
+  fi
+  return 0
+}
+
 # Computed once, not per-picker-iteration: container mode is opt-in per
 # repo, never per worktree, so this one flag governs every code path
 # below (main loop, iTerm2 attach, ruori rm, the picker's TMUX column) for
@@ -3371,7 +3461,18 @@ while true; do
 
   case "$menu_choice" in
     "switch to")
-      activate_worktree "$selected_path" "$session_name" "$selected_branch"
+      move_rc=0
+      offer_move_branch_to_worktree "$selected_path" "$selected_branch" || move_rc=$?
+      case "$move_rc" in
+        0)
+          parse_worktrees
+          activate_worktree "$created_worktree_path" \
+            "$(session_name_for "$selected_branch" "$created_worktree_path")" "$selected_branch"
+          ;;
+        1)
+          activate_worktree "$selected_path" "$session_name" "$selected_branch"
+          ;;
+      esac
       ;;
     "delete worktree")
       delete_worktree "$selected_path" "$selected_branch" "$session_name"

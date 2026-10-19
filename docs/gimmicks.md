@@ -474,6 +474,23 @@ menu runs *after* the outer fzf has exited so it's plain bash with a
 terminal (why the old Ctrl-D/Ctrl-X `execute` bindings went, #11).
 Anything `--preview` needs is `export`ed. (`CLAUDE.md` item 10.)
 
+### A branch switched into an existing worktree can't simply get its own
+
+**Fact.** The picker lists worktrees, but a row is labelled by whatever
+branch is checked out there — so a main checkout left on a feature
+branch (or a worktree someone ran `git switch` in) shows up looking
+like any other branch, and "switch to" opened it in the wrong
+directory. Git refuses to check out one branch in two worktrees, so a
+worktree for it can't be created while it's still checked out there.
+**Decision.** "switch to" compares the row's branch with the
+worktree's home branch (default branch for the main checkout; for a
+linked one, the single local branch whose flattened name matches its
+directory) and offers to switch the original back and create a
+worktree for the branch — refusing on uncommitted changes rather than
+carrying them along. Worktrees not laid out the way ruori creates them
+have no detectable home branch and are left alone.
+(`offer_move_branch_to_worktree`, `home_branch_for`.)
+
 ### Automatic periodic refresh was tried and reverted twice
 
 **Fact.** Killing and restarting fzf reset the cursor and query;
