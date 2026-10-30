@@ -116,7 +116,10 @@ switching to/deleting/killing a worktree via the Enter menu) reuses
 whatever Ctrl-F last fetched, cached on disk at
 `<git-common-dir>/ruori/pr-status.cache` (shared by every worktree of
 the repo) so it survives across the `fzf reload`s each of those spawn
-as a fresh process. Until you press Ctrl-F at least once, `PR` shows
+as a fresh process. The cache also records each PR's URL, so the
+picker's preview panel and `ruori details` show the `PR` status as a
+clickable terminal hyperlink to that PR on GitHub (terminals without
+OSC 8 support just show the plain status). Until you press Ctrl-F at least once, `PR` shows
 `?` for everything, not `-`.
 
 ## `USAGE` cost
