@@ -699,3 +699,12 @@ from `branches_without_worktree` rather than a typed name.
 `.ruori.conf` must still be deleted by `ruori rm`. **Decision.**
 Deterministic names `<session>__vol-<sanitized-path>` (no cache file
 needed, unlike ports) and `docker volume ls --filter name=^<session>__vol-`.
+
+### Empty tab-separated fields must not reach `read`
+
+**Fact.** `read -r a b c` with `IFS=$'\t'` treats tab as whitespace, so
+consecutive tabs collapse and an empty field (a PR's `reviewDecision`
+before anyone reviews) shifts every later field left. That made merged
+PRs read as `pending` and lost the PR URL. **Decision.** The `jq`
+projection in `fetch_pr_statuses` emits `-` for an empty
+`reviewDecision`, so no field is ever empty.
