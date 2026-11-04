@@ -3582,7 +3582,7 @@ while true; do
       esac
       ;;
     "delete worktree")
-      delete_worktree "$selected_path" "$selected_branch" "$session_name"
+      delete_worktree "$selected_path" "$selected_branch" "$session_name" || true
       ;;
     "open host terminal")
       open_host_terminal_for "$selected_path" "$selected_branch"
