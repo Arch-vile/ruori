@@ -97,7 +97,8 @@ Keybindings:
   than launching a browser itself, and waits for Enter before
   returning to the picker so the link doesn't scroll away unread),
   **rebuild container** (container mode only — see "`ruori rebuild
-  <branch>`" below), **kill tmux**/**stop container** (kills the tmux
+  <branch>`" below), **delete container** (container mode only — see
+  "`ruori rm-container <branch>`" below), **kill tmux**/**stop container** (kills the tmux
   session, or in container mode stops the container outright; the
   `TMUX`/Docker state updates on the next picker reload, and switching
   to that row afterwards starts a fresh session for it), and **back**.
@@ -164,7 +165,9 @@ picker" above.
 
 Deletes a worktree and everything `ruori` itself created for it:
 
-1. kills its tmux session, if one is running
+1. kills its tmux session, if one is running, and in container mode
+   removes its container the same way `ruori rm-container` does (see
+   below)
 2. `git worktree remove`s it — if git refuses (uncommitted/untracked
    changes), you're asked whether to force it, which discards those
    changes
@@ -207,6 +210,31 @@ never re-copied into an already-running container — see
   state lived only inside the old container.
 
 Same as picking "rebuild container" from the Enter menu on the
+highlighted row in the picker.
+
+## `ruori rm-container <branch>`
+
+Container mode only — deletes the worktree's container but keeps the
+worktree. Use it to free the disk and memory of a worktree you aren't
+working on, or for a completely clean container including its volumes
+(`ruori rebuild` keeps those).
+
+- Removes the container (`docker rm -f`, so a running one is stopped
+  first, and the tmux session inside it ends with it), its
+  `container-volume` volumes, and its allocated host ports (`ruori
+  ports`).
+- Keeps the worktree, its branch, and the repo's
+  `container-shared-volume` volumes, which other worktrees' containers
+  mount too.
+- The next switch to that worktree creates a fresh container, same as
+  the first time: image build, `docker run`, `container-copy`,
+  `container-init`, empty `container-volume` volumes. Host ports are
+  allocated again from the same hash-derived seed, so they usually come
+  back the same.
+- Lists what it is about to remove and confirms interactively first
+  (`[y/N]`).
+
+Same as picking "delete container" from the Enter menu on the
 highlighted row in the picker.
 
 ## `ruori details <branch-or-session>`
@@ -267,7 +295,8 @@ the configuration-driven pieces it points at.
 In container mode, the Repository scope under managed resources also
 lists every `container-shared-volume` Docker volume of this repo (by
 name prefix, so one whose directive has since been removed still
-shows up) — the one kind of volume `ruori rm` never removes, since
+shows up) — the one kind of volume `ruori rm` and `ruori rm-container`
+never remove, since
 every worktree's container shares it; remove it yourself with `docker
 volume rm` when you no longer need it.
 

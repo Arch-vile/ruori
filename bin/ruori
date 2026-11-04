@@ -1176,9 +1176,9 @@ allocate_port_for() {
 }
 
 # Strips every row for $1 (a session name) from the ports state file —
-# called from teardown (`ruori rm` / the Enter menu's "delete worktree")
-# so freed ports aren't shown as allocated by `ruori ports` or reused by
-# a later, unrelated worktree.
+# called from container teardown (remove_container_for) so freed ports
+# aren't shown as allocated by `ruori ports` or reused by a later,
+# unrelated worktree.
 release_ports_for() {
   local session="$1" cache_file tmp
   cache_file="$(ports_cache_file)" || return 0
@@ -2085,20 +2085,7 @@ delete_worktree() {
   tmux kill-session -t "$session" 2>/dev/null || true
 
   if [ "$CONTAINER_MODE" = "1" ]; then
-    docker rm -f "$session" 2>/dev/null || true
-    release_ports_for "$session"
-    # By name prefix, not by re-reading the current container-volume
-    # directives -- a volume created under a directive since edited or
-    # removed from .ruori.conf still gets cleaned up here, same as
-    # `docker rm -f` above doesn't care whether "container on" is still
-    # set. `container-shared-volume` volumes are deliberately not matched
-    # by this prefix -- they belong to the repo, not this worktree, and
-    # every other worktree's container still mounts them.
-    local vol
-    while IFS= read -r vol; do
-      [ -n "$vol" ] || continue
-      docker volume rm "$vol" 2>/dev/null || true
-    done < <(docker volume ls -q --filter "name=^${session}__vol-" 2>/dev/null)
+    remove_container_for "$session"
   fi
 
   local rm_err
@@ -2150,6 +2137,75 @@ delete_worktree() {
   }
 
   echo "ruori: deleted worktree for '$branch'"
+}
+
+# By name prefix, not by re-reading the current container-volume
+# directives, so a volume whose directive was since edited or removed
+# is still found. Never matches `container-shared-volume` volumes, which
+# belong to the repo rather than one worktree.
+container_native_volume_names_for() {
+  docker volume ls -q --filter "name=^${1}__vol-" 2>/dev/null
+}
+
+# Removes the container for session $1 plus what ruori created for it
+# alone: its port allocations and its `container-volume` volumes.
+remove_container_for() {
+  local session="$1" vol
+  docker rm -f "$session" 2>/dev/null || true
+  release_ports_for "$session"
+  while IFS= read -r vol; do
+    [ -n "$vol" ] || continue
+    docker volume rm "$vol" 2>/dev/null || true
+  done < <(container_native_volume_names_for "$session")
+}
+
+# The container half of delete_worktree: removes worktree $1's container
+# (session $3) via remove_container_for but keeps the worktree and its
+# branch. The next switch creates a fresh container, as on first use.
+# Confirms first, like delete_worktree.
+delete_container_for() {
+  local path="$1" branch="$2" session="$3" confirm state vols ports cache_file line
+  state="none"
+  if container_running "$session"; then
+    state="running"
+  elif container_exists "$session"; then
+    state="stopped"
+  fi
+  vols="$(container_native_volume_names_for "$session")"
+  ports=""
+  cache_file="$(ports_cache_file)" && [ -f "$cache_file" ] && {
+    log_file_read "$cache_file"
+    ports="$(awk -F'\t' -v s="$session" '$1 == s { print "localhost:" $3 " -> " $2 }' "$cache_file")"
+  }
+
+  if [ "$state" = "none" ] && [ -z "$vols" ] && [ -z "$ports" ]; then
+    echo "ruori: '$branch' has no container, container-volume or allocated port; nothing to delete"
+    return 0
+  fi
+
+  echo "About to delete the container for '$branch' (the worktree is kept):"
+  case "$state" in
+    running) echo "  container: $session (running; its tmux session ends with it)" ;;
+    stopped) echo "  container: $session (stopped)" ;;
+    *)       echo "  container: none" ;;
+  esac
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    echo "  volume:    $line"
+  done <<<"$vols"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    echo "  port:      $line"
+  done <<<"$ports"
+  echo "Kept: the worktree at $path, its branch, and container-shared-volume volumes."
+  read -r -p "Delete this container? [y/N] " confirm
+  case "$confirm" in
+    y|Y|yes|YES) ;;
+    *) echo "ruori: aborted, nothing deleted"; return 1 ;;
+  esac
+
+  remove_container_for "$session"
+  echo "ruori: deleted container for '$branch'; switching to it creates a fresh one"
 }
 
 # Creates a worktree for $1 (an existing or brand-new branch), optionally
@@ -2584,7 +2640,7 @@ case "$cmd" in
     resources_entry "$common_dir/ruori/activation-times" "Internal to ruori, safe to delete. One line per worktree with the epoch time it was last activated, used only to sort the picker/list so your most recently used worktree sorts first. Rewritten by ruori every time you switch to a worktree."
     resources_entry "$common_dir/ruori/pr-status.cache" "Internal to ruori; delete it any time to force a re-fetch. Caches each branch's GitHub PR status (and PR URL, for the preview's link) so the picker doesn't call 'gh' on every reload. Written only by a Ctrl-F fetch in the picker, or by 'ruori list'/'ruori details' (which always fetch fresh); read on every other picker reload."
     resources_entry "$common_dir/ruori/usage-cost.cache" "Internal to ruori; delete it any time to force a re-fetch. Host mode only: caches each worktree's total Claude Code spend, scanned from ~/.claude/projects (see above), so the picker doesn't rescan your whole Claude Code history on every reload. Written by the same Ctrl-F / 'list' / 'details' fetches as the PR cache above. Container mode doesn't use it -- it reads .ruori/usage live instead."
-    resources_entry "$common_dir/ruori/ports" "Internal to ruori; only matters in container mode. A worktree's host port is only seeded by a hash of it -- ruori then scans forward from that seed for the first port that's actually free, so the final pick depends on ambient state (what else is running) at that moment, not the hash alone. Docker bakes that exact port into the container permanently at creation and won't let it change without recreating the container, so ruori has to remember what it picked here rather than recomputing it later and risking a different answer. Written when a container-mode worktree's container first starts; its entries are dropped when that worktree is removed ('ruori rm')."
+    resources_entry "$common_dir/ruori/ports" "Internal to ruori; only matters in container mode. A worktree's host port is only seeded by a hash of it -- ruori then scans forward from that seed for the first port that's actually free, so the final pick depends on ambient state (what else is running) at that moment, not the hash alone. Docker bakes that exact port into the container permanently at creation and won't let it change without recreating the container, so ruori has to remember what it picked here rather than recomputing it later and risking a different answer. Written when a container-mode worktree's container first starts; its entries are dropped when that worktree or its container is removed ('ruori rm' / 'ruori rm-container')."
     resources_entry "$common_dir/ruori/iterm.log" "Debug-only -- you don't need to read this unless an iTerm2 window is misbehaving (see docs/troubleshooting.md). An append-only log of the manager loop's own iTerm2 window open/close lifecycle. Written continuously by ruori for as long as the manager loop ('ruori' with no args) keeps running."
     resources_entry "$common_dir/ruori/file-io.log" "Debug-only -- for troubleshooting/transparency (see docs/troubleshooting.md). An append-only log of every read/write ruori's own script code performs against a file (state/cache files, $CONFIG_FILENAME, worktree copy-in, generated files) -- not file access done inside a child process it shells out to (git, docker, code, fzf, osascript), which isn't observable here. Written by every ruori command that touches a file, including read-only ones like 'list'."
     resources_entry "$common_dir/ruori/overlay.log" "Debug-only -- for troubleshooting a worktree-overlay that didn't get applied (see docs/troubleshooting.md). An append-only log of every worktree-overlay patch that neither applied nor was already applied, with the reason and which .rej file (under $common_dir/ruori/overlays/) to inspect. Written only when that happens."
@@ -2628,7 +2684,7 @@ case "$cmd" in
       if [ -n "$shared_volumes" ]; then
         while IFS= read -r shared_volume; do
           [ -n "$shared_volume" ] || continue
-          resources_entry "$shared_volume" "Not a file -- a Docker-managed volume shared by every worktree's container of this repo, per a 'container-shared-volume' directive in $CONFIG_FILENAME (e.g. a pnpm store, so packages are downloaded once per repo rather than once per worktree -- see docs/container-sandbox-guide.md's 'Recipe: a Node.js monorepo'). Created the first time any container that mounts it starts. Never removed by 'ruori rm' (other worktrees still use it); remove it yourself with 'docker volume rm $shared_volume' once no container mounts it -- listed here by name prefix, so it still shows up even if that directive has since been removed."
+          resources_entry "$shared_volume" "Not a file -- a Docker-managed volume shared by every worktree's container of this repo, per a 'container-shared-volume' directive in $CONFIG_FILENAME (e.g. a pnpm store, so packages are downloaded once per repo rather than once per worktree -- see docs/container-sandbox-guide.md's 'Recipe: a Node.js monorepo'). Created the first time any container that mounts it starts. Never removed by 'ruori rm' or 'ruori rm-container' (other worktrees still use it); remove it yourself with 'docker volume rm $shared_volume' once no container mounts it -- listed here by name prefix, so it still shows up even if that directive has since been removed."
         done <<<"$shared_volumes"
       fi
     else
@@ -2637,13 +2693,13 @@ case "$cmd" in
     resources_scope "Worktree"
     resources_entry "$worktree_session" "Not a file, though 'tmux attach -t $worktree_session' works if you want to look. ruori creates this tmux session (or reuses it if already running) the moment you switch to this worktree; it keeps running in the background after you switch away, until 'ruori rm' or the picker's Enter menu ('delete worktree' or 'kill tmux') kills it."
     if container_mode_enabled; then
-      resources_entry "$worktree_session" "This worktree's Docker container -- same name as its tmux session above. Created by ruori the first time you switch to this worktree; stopped (not removed) when its tmux session is killed, and only actually removed by 'ruori rm'. ruori also colors that tmux session's status bar (a hash of the session name, see container_color_for) to match this worktree's row in the picker -- a visual cue that you're on a container, set on every switch, not something you configure."
-      resources_entry "(recorded in $common_dir/ruori/ports, once allocated)" "Not something you manage directly -- see 'ruori ports' for this worktree's live host-port mapping, if its container has started at least once. Allocated by ruori the first time this worktree's container starts, and freed when the worktree is removed."
-      native_volumes="$(docker volume ls -q --filter "name=^${worktree_session}__vol-" 2>/dev/null)"
+      resources_entry "$worktree_session" "This worktree's Docker container -- same name as its tmux session above. Created by ruori the first time you switch to this worktree; stopped (not removed) when its tmux session is killed, and only actually removed by 'ruori rm', or by 'ruori rm-container' (which keeps the worktree; the next switch creates a fresh container). ruori also colors that tmux session's status bar (a hash of the session name, see container_color_for) to match this worktree's row in the picker -- a visual cue that you're on a container, set on every switch, not something you configure."
+      resources_entry "(recorded in $common_dir/ruori/ports, once allocated)" "Not something you manage directly -- see 'ruori ports' for this worktree's live host-port mapping, if its container has started at least once. Allocated by ruori the first time this worktree's container starts, and freed when the worktree or its container is removed ('ruori rm' / 'ruori rm-container')."
+      native_volumes="$(container_native_volume_names_for "$worktree_session")"
       if [ -n "$native_volumes" ]; then
         while IFS= read -r native_volume; do
           [ -n "$native_volume" ] || continue
-          resources_entry "$native_volume" "Not a file -- a Docker-managed volume (not the worktree's own filesystem) shadowing one subpath of this worktree inside the container, per a 'container-volume' directive in $CONFIG_FILENAME (see docs/container-sandbox-guide.md). Created the first time this worktree's container starts, or on 'ruori rebuild' for a directive added since; only actually removed by 'ruori rm', same as the container itself -- queried here by name, not by re-reading the current directive, so it's still listed even if that directive has since been edited or removed."
+          resources_entry "$native_volume" "Not a file -- a Docker-managed volume (not the worktree's own filesystem) shadowing one subpath of this worktree inside the container, per a 'container-volume' directive in $CONFIG_FILENAME (see docs/container-sandbox-guide.md). Created the first time this worktree's container starts, or on 'ruori rebuild' for a directive added since; only actually removed by 'ruori rm' or 'ruori rm-container', same as the container itself -- queried here by name, not by re-reading the current directive, so it's still listed even if that directive has since been edited or removed."
         done <<<"$native_volumes"
       fi
       if [ -n "$(container_host_ports)" ]; then
@@ -2716,6 +2772,31 @@ case "$cmd" in
     fi
     session_name="$(session_name_for "${branches[$found]}" "${paths[$found]}")"
     rebuild_container_for "$session_name" "${paths[$found]}"
+    exit $?
+    ;;
+  rm-container)
+    branch_arg="${2:-}"
+    if [ -z "$branch_arg" ]; then
+      echo "ruori: usage: ruori rm-container <branch>" >&2
+      exit 1
+    fi
+    if [ "$CONTAINER_MODE" != "1" ]; then
+      echo "ruori: 'rm-container' only applies in container mode (see 'container on' in ${CONFIG_FILENAME})" >&2
+      exit 1
+    fi
+    found=-1
+    for i in "${!paths[@]}"; do
+      if [ "${branches[$i]}" = "$branch_arg" ]; then
+        found=$i
+        break
+      fi
+    done
+    if [ "$found" -lt 0 ]; then
+      echo "ruori: no worktree found for branch '$branch_arg' (see 'ruori list')" >&2
+      exit 1
+    fi
+    session_name="$(session_name_for "${branches[$found]}" "${paths[$found]}")"
+    delete_container_for "${paths[$found]}" "${branches[$found]}" "$session_name"
     exit $?
     ;;
   details)
@@ -2888,7 +2969,7 @@ case "$cmd" in
     exit 0
     ;;
   *)
-    echo "ruori: unknown command '$cmd' (expected 'switch', 'new', 'list', 'rm', 'ports', or 'resources')" >&2
+    echo "ruori: unknown command '$cmd' (expected 'switch', 'new', 'list', 'rm', 'rebuild', 'rm-container', 'details', 'terminal', 'ports', 'resources', or 'init')" >&2
     exit 1
     ;;
 esac
@@ -3471,7 +3552,7 @@ while true; do
     if [ -n "$(browser_links_for "$session_name")" ]; then
       menu_items+=("open in browser")
     fi
-    menu_items+=("rebuild container")
+    menu_items+=("rebuild container" "delete container")
   fi
   menu_items+=("$ctrl_x_label" "back")
 
@@ -3514,6 +3595,9 @@ while true; do
       ;;
     "rebuild container")
       rebuild_container_for "$session_name" "$selected_path" || true
+      ;;
+    "delete container")
+      delete_container_for "$selected_path" "$selected_branch" "$session_name" || true
       ;;
     "kill tmux"|"stop container")
       if [ "$CONTAINER_MODE" = "1" ]; then

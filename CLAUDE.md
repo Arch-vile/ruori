@@ -126,8 +126,8 @@ change:
    keyed so every worktree of a repo shares one copy rather than each
    worktree getting its own.
 10. **Commands** (the big `case "$cmd" in` block) — user-facing:
-    `switch` (default, the manager loop), `new`, `list`, `rm`, `ports`,
-    `details`, `resources`, `init`. Hidden, invoked only by the picker's
+    `switch` (default, the manager loop), `new`, `list`, `rm`, `rebuild`,
+    `rm-container`, `ports`, `details`, `terminal`, `resources`, `init`. Hidden, invoked only by the picker's
     own fzf key bindings as subprocesses: `__fzfgen`, `__fzfgen_fetch`,
     `__delete_by_fields`, `__new_prompt` — these exist because fzf's
     `reload`/`execute` bindings shell out to a fresh process that can't
