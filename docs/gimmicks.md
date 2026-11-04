@@ -696,9 +696,10 @@ from `branches_without_worktree` rather than a typed name.
 ### Volumes are cleaned up by name prefix, not by re-reading directives
 
 **Fact.** A volume created under a directive since removed from
-`.ruori.conf` must still be deleted by `ruori rm`. **Decision.**
+`.ruori.conf` must still be deleted by `ruori rm`/`ruori rm-container`. **Decision.**
 Deterministic names `<session>__vol-<sanitized-path>` (no cache file
 needed, unlike ports) and `docker volume ls --filter name=^<session>__vol-`.
+(`container_native_volume_names_for`.)
 
 ### Empty tab-separated fields must not reach `read`
 

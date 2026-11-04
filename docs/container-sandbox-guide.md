@@ -129,7 +129,7 @@ with none of these behaves exactly as it does today.
   whatever populates that path (`pnpm install`, etc.) *inside* the
   container afterward, same as you would without this directive, since
   nothing is copied in from the host side. Only actually removed by
-  `ruori rm`, same as the container itself; `docker start`/`docker
+  `ruori rm` or `ruori rm-container`, same as the container itself; `docker start`/`docker
   stop` leaves it untouched. See "Directive comparison" below for how
   this differs from `container-copy`.
 
@@ -153,7 +153,7 @@ with none of these behaves exactly as it does today.
   any container mounting it starts, seeding it from the image's
   contents and ownership at that path, so create the directory in the
   Dockerfile (owned by the container's user) before pointing a tool at
-  it. Never removed by `ruori rm` — other worktrees still use it; `ruori
+  it. Never removed by `ruori rm` or `ruori rm-container` — other worktrees still use it; `ruori
   resources` lists it under Repository, and `docker volume rm` removes
   it once no container mounts it. Same creation-time rule and drift
   warning as `container-volume`: an added or removed line needs `ruori
@@ -456,8 +456,8 @@ worktree or `$PNPM_HOME`.
   the same change.
 - `container-volume` volumes are per worktree, so each worktree's
   container still runs its own install once (from the shared store);
-  `ruori rebuild` keeps them, `ruori rm` removes them. The shared store
-  survives `ruori rm`.
+  `ruori rebuild` keeps them, `ruori rm` and `ruori rm-container` remove
+  them. The shared store survives both.
 - Migrating from an older `container-volume .pnpm-store` line: replace
   it with the lines above, then `ruori rebuild <branch>` each existing
   worktree (the switch-time drift warning will prompt for it). The old
@@ -1011,8 +1011,9 @@ action menu; `BACKEND_PORT` doesn't, since it has no `:http`.
 
 ## What's not covered here
 
-- Idle-eviction of long-running containers — none is built in; `ruori rm`
-  is the only teardown trigger, so remove worktrees you're done with.
+- Idle-eviction of long-running containers — none is built in. Remove
+  worktrees you're done with (`ruori rm`), or just the container of one
+  you're not using right now (`ruori rm-container`).
 - Multi-service naming beyond the informal `:<NAME>` convention on
   `container-port` — `ruori` doesn't validate or coordinate names across
   services.
