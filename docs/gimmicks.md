@@ -272,27 +272,49 @@ error, not corruption. (`allocate_port_for`; plan "Open risks".)
 
 ## Credentials inside the container
 
-### Claude Code's login is in the macOS Keychain, and needs two files
+### Claude Code's login can't be copied: each renewal uses up the last one
 
-**Fact.** Nothing on a Mac host for `container-copy` to copy. Logging
-in from inside a Linux container yields plain files — but
-`.credentials.json` alone still shows "Not logged in": the sibling
-`~/.claude.json` (in `$HOME`, not under `~/.claude`) is also required.
-Neither can be symlinked to shared storage, because Claude Code writes
-both via write-then-rename and `rename()` onto a symlink replaces the
-symlink with a plain file, silently un-sharing it. **Rejected.**
-Sharing one live login by pointing `CLAUDE_CONFIG_DIR` at a directory
-under `RUORI_SHARED_DIR` from the image's entrypoint — didn't carry the
-login across containers in practice, and would share every session
-transcript too. `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`)
-forwarded via `container-env` — that token can only make model
-requests, so the banner says "Claude API" even on Enterprise, `/usage`
-returns nothing, and claude.ai connectors and Remote Control don't
-work. **Decision.** Log in once inside any container, `docker cp`
-both files out to the host, and copy them into every container with
-two `container-copy` lines; each container then holds an independent,
-fully-featured login with private sessions. (Guide "Recipe: Claude
-Code auth".)
+**Fact.** On a Mac host the login is in the Keychain, so there's
+nothing for `container-copy` to copy. Logging in from inside a Linux
+container yields plain files, and two are needed: `.credentials.json`
+alone still shows "Not logged in" until the `oauthAccount` entry of
+`~/.claude.json` (in `$HOME`, not under `~/.claude`) is there too.
+Claude Code renews its access token every few hours, and the renewal
+token is single-use. That isn't documented by Anthropic, but many Claude
+Code bug reports describe it, and it explains copied logins failing
+one after another. So every copy of a login dies as soon as any one
+copy renews. Neither file can be symlinked to shared storage either:
+Claude Code writes both via write-then-rename, and `rename()` onto a
+symlink replaces the symlink with a plain file, silently un-sharing it.
+**Rejected.**
+- Copying one login into every container with `container-copy` (the
+  previous recipe): the copies went stale after the first renewal.
+- Pointing `CLAUDE_CONFIG_DIR` at a directory under `RUORI_SHARED_DIR`:
+  didn't carry the login across containers in practice, and would share
+  every session transcript too.
+- Pushing the host's Keychain login into containers: shares a
+  single-use renewal token with the host's own `claude`.
+- `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`: it can only make
+  model requests, so the banner says "Claude API" even on Enterprise,
+  `/usage` returns nothing, and connectors and Remote Control don't
+  work.
+- A `claude` wrapper earlier on `PATH`: tmux starts login shells, and
+  Debian's `/etc/profile` resets `PATH` in them, so the wrapper is
+  silently skipped.
+- Having the sync renew ahead of Claude Code so two containers never
+  renew at once: more machinery than restarting the rare session that
+  loses that race.
+- A ruori built-in that syncs files on switch: ruori code for what a
+  recipe in the image can do.
+
+**Decision.** The image's `ENTRYPOINT` runs a loop that, every 5
+seconds, compares the container's login with one shared copy under
+`RUORI_SHARED_DIR` and keeps the newer one (later `expiresAt`) in both
+places. It never shares a login without a refresh token, which is what
+a failed renewal leaves behind. It takes a `mkdir` lock, which works on
+any bind mount. It rewrites `~/.claude.json` only when the account
+entry differs. (`ruori-claude-login-sync` in
+`docs/new-repo-setup-guide.md`; guide "Recipe: Claude Code auth".)
 
 ### `gh`'s `hosts.yml` may be only a Keychain reference
 
