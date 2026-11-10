@@ -2,7 +2,7 @@
 
 Follow this to create the config `ruori` (a
 git-worktree context switcher) needs for **this repo** —
-`.ruori.conf` *and* a `.devcontainer/Dockerfile` (plus three
+`.ruori.conf` *and* a `.devcontainer/Dockerfile` (plus a few
 small files the Dockerfile copies in, see step 3). All of this is part
 of the same one-off setup: `ruori`'s whole point is to run a coding agent
 and its dev server inside a container, confined to just the worktree
@@ -224,8 +224,8 @@ mode at all:
   installed.
 - How the dev server is started, and which port(s) it listens on.
 - Whether any host credentials need `container-copy`ing in (and their
-  exact host path) — e.g. an agent's own credentials file, or GitHub
-  CLI auth (`~/.config/gh/hosts.yml`, or a per-identity `GH_CONFIG_DIR`
+  exact host path) — e.g. GitHub CLI auth (but not Claude Code's
+  login, which the login sync in the Dockerfile section below shares) (`~/.config/gh/hosts.yml`, or a per-identity `GH_CONFIG_DIR`
   if the user keeps separate work/personal `gh` logins — see the
   "GitHub CLI auth" recipe in the container sandbox guide). Only ever
   copy what the user explicitly names; never propose copying something
@@ -250,7 +250,7 @@ mode at all:
 
 The Dockerfile itself needs: `git`, `tmux`, and `jq` installed (`git`
 and `tmux` for `ruori` to attach a session inside the container at all;
-`jq` for the status hook and status line below), the project's runtime, and — if the
+`jq` for the Claude Code scripts below), the project's runtime, and — if the
 user wants something to auto-start (an agent, the dev server) —
 either the image's own `CMD`/`ENTRYPOINT` or a tmux `default-command`
 baked into a `~/.tmux.conf`. Add `socat` too if you proposed any
@@ -532,6 +532,163 @@ for the entire time the subagent is running. Hooking
 `PreToolUse`/`PostToolUse` for every tool call re-asserts `busy`
 immediately whenever anything is happening, closing that gap.
 
+### Claude Code login — one shared login for all of this repo's containers
+
+If the user's agent is Claude Code, the image also runs
+`ruori-claude-login-sync` as its `ENTRYPOINT`. Without it, every
+container needs its own `/login`: once when it's created, and again
+each time that login expires.
+
+How it works:
+
+- Every 5 seconds, the script compares this container's Claude Code
+  login with one shared copy in `$RUORI_SHARED_DIR/claude-login/`,
+  which every container of this repo sees. It keeps the newer one in
+  both places. "Newer" means its access token expires later, which
+  every renewal and every fresh `/login` moves forward.
+- So the user logs in once, in any container. Within about 10 seconds
+  every running container of the repo has the login, and new
+  containers start with it.
+- Only the login is shared: `~/.claude/.credentials.json` and the
+  `oauthAccount` entry of `~/.claude.json`. Sessions, history and
+  settings stay private to each container.
+- Copying one login into each container doesn't work. Claude Code
+  renews its login every few hours, and each renewal uses up the
+  previous one, so every other copy stops working.
+
+`.devcontainer/ruori-claude-login-sync`:
+
+```bash
+#!/usr/bin/env bash
+# ruori-claude-login-sync - shares one Claude Code login across all of
+# this repo's containers. Runs as the image's ENTRYPOINT: keeps this
+# container's login and a shared copy under $RUORI_SHARED_DIR in sync
+# every few seconds, newest login wins, then runs the container's command.
+# Only the login is shared; sessions, history and settings stay private.
+# Copy it unchanged; pass any previous ENTRYPOINT as its arguments.
+
+INTERVAL=5
+
+creds="$HOME/.claude/.credentials.json"
+config="$HOME/.claude.json"
+shared="${RUORI_SHARED_DIR:-}/claude-login"
+shared_creds="$shared/credentials.json"
+shared_account="$shared/oauth-account.json"
+lock="$shared/lock"
+
+# The login's expiry in ms, 0 if there's no usable login (e.g. after a
+# failed renewal). Fails on a file it can't parse, so nothing acts on it.
+expiry() {
+  [ -e "$1" ] || { echo 0; return 0; }
+  jq -er '.claudeAiOauth // {}
+    | if (.refreshToken // "") != "" and (.expiresAt | type) == "number"
+      then .expiresAt else 0 end' "$1" 2>/dev/null
+}
+
+# "publish" if this container's login is newer, "pull" if the shared one is.
+direction() {
+  local mine theirs
+  mine="$(expiry "$creds")" && theirs="$(expiry "$shared_creds")" || return 0
+  if [ "$mine" -gt "$theirs" ]; then
+    echo publish
+  elif [ "$theirs" -gt "$mine" ]; then
+    echo pull
+  fi
+}
+
+publish() {
+  cp "$creds" "$shared_creds.ruori-sync" && mv -f "$shared_creds.ruori-sync" "$shared_creds"
+  if jq -e '.oauthAccount' "$config" >"$shared_account.ruori-sync" 2>/dev/null; then
+    mv -f "$shared_account.ruori-sync" "$shared_account"
+  else
+    rm -f "$shared_account.ruori-sync"
+  fi
+}
+
+pull() {
+  mkdir -p "$(dirname "$creds")"
+  cp "$shared_creds" "$creds.ruori-sync" && mv -f "$creds.ruori-sync" "$creds"
+  [ -e "$shared_account" ] || return 0
+  # Claude Code also needs the account entry. Rewritten only when it
+  # differs, since Claude Code itself writes this file constantly.
+  jq -e --slurpfile a "$shared_account" '.oauthAccount == $a[0]' "$config" >/dev/null 2>&1 && return 0
+  { cat "$config" 2>/dev/null || echo '{}'; } \
+    | jq --slurpfile a "$shared_account" '.oauthAccount = $a[0] | .hasCompletedOnboarding //= true' \
+      >"$config.ruori-sync" \
+    && mv -f "$config.ruori-sync" "$config" \
+    || rm -f "$config.ruori-sync"
+}
+
+# mkdir is atomic on any filesystem, bind mounts included.
+take_lock() {
+  local i
+  for ((i = 0; i < 50; i++)); do
+    mkdir "$lock" 2>/dev/null && return 0
+    sleep 0.1
+  done
+  # Held for 5s: left behind by a sync that was killed midway.
+  rm -rf "$lock"
+  mkdir "$lock" 2>/dev/null
+}
+
+sync_login() {
+  [ -n "$(direction)" ] || return 0
+  take_lock || return 0
+  # Checked again under the lock: another container may have just synced.
+  case "$(direction)" in
+    publish) publish ;;
+    pull) pull ;;
+  esac
+  rmdir "$lock" 2>/dev/null
+}
+
+if [ -n "${RUORI_SHARED_DIR:-}" ]; then
+  (
+    umask 077
+    mkdir -p "$shared" || exit 0
+    while :; do
+      sync_login
+      sleep "$INTERVAL"
+    done
+  ) </dev/null >/dev/null 2>&1 &
+fi
+
+exec "$@"
+```
+
+Then, in the Dockerfile, after `jq` is installed:
+
+```dockerfile
+COPY .devcontainer/ruori-claude-login-sync /usr/local/bin/ruori-claude-login-sync
+RUN chmod +x /usr/local/bin/ruori-claude-login-sync
+ENTRYPOINT ["/usr/local/bin/ruori-claude-login-sync"]
+```
+
+**Check these before presenting the plan:**
+
+- **An existing `ENTRYPOINT`.** Setting one replaces whatever the
+  Dockerfile or its base image had. The official `node` images, for
+  example, use `docker-entrypoint.sh`. Keep the old one by passing it
+  as arguments, and the script runs it after starting the sync:
+  `ENTRYPOINT ["/usr/local/bin/ruori-claude-login-sync", "docker-entrypoint.sh"]`.
+- **It has to be the `ENTRYPOINT`.** Don't turn it into a `claude`
+  wrapper earlier on `PATH`, or a line in a shell rc file. tmux starts
+  login shells, and on Debian-based images those reset `PATH`, so a
+  wrapper would be silently skipped. The `ENTRYPOINT` runs on every
+  container start, however `claude` is later launched.
+- **No `container-copy` of Claude Code's login files.** Don't copy
+  `.credentials.json` or `.claude.json` in. The shared login replaces
+  that.
+- **The user that runs `claude`.** The script syncs the login of the
+  user the `ENTRYPOINT` runs as: the image's `USER`, root by default.
+  That's also the user `docker exec` runs as. If the image runs Claude
+  Code as a different user some other way, say so in the plan.
+- **`CLAUDE_CONFIG_DIR`.** If it's set, Claude Code keeps its login
+  there and this script won't find it. Say so in the plan.
+
+Tell the user in the plan: after each container is rebuilt
+(`ruori rebuild <branch>`), run `/login` once in any one of them.
+
 ## Step 4 — present the plan
 
 **Stop here — don't create or change anything yet.** Summarize for the
@@ -548,7 +705,9 @@ user:
   (or, if one already exists at the target path, whether you're
   reusing it as-is or changing it, and why) — including the Claude Code
   status hook and status line files from the Dockerfile section above,
-  if the agent is Claude Code, and the outcome of its three checks.
+  if the agent is Claude Code, and the outcome of its three checks,
+  plus the login sync script, its `ENTRYPOINT` line and the outcome of
+  its checks.
 - If you determined this repo can't reasonably be containerized, say
   so here explicitly, with your reasoning, instead of silently leaving
   the container directives out.
@@ -571,9 +730,9 @@ Only after the user confirms:
 2. Write the confirmed Dockerfile at the confirmed path (default
    `.devcontainer/Dockerfile`, relative to the main worktree root),
    unless the plan reused an existing one unchanged.
-3. Write `ruori-claude-status-hook`, `ruori-claude-usage-statusline` and
-   `claude-settings.json` next to it (if the agent is Claude Code), per
-   the Dockerfile section above.
+3. Write `ruori-claude-status-hook`, `ruori-claude-usage-statusline`,
+   `claude-settings.json` and `ruori-claude-login-sync` next to it (if
+   the agent is Claude Code), per the Dockerfile sections above.
 
 Don't run, build, or test anything — this guide's job ends at writing
 these files.
